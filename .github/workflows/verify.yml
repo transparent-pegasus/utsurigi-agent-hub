@@ -1,0 +1,60 @@
+name: Verify
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+          rustup default 1.99.1
+
+      - name: Install restic
+        run: |
+          curl -fsSL https://github.com/restic/restic/releases/download/v0.19.1/restic_0.19.1_linux_amd64.bz2 -o "$RUNNER_TEMP/restic.bz2"
+          echo "f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c  $RUNNER_TEMP/restic.bz2" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/bin"
+          bzip2 --decompress --stdout "$RUNNER_TEMP/restic.bz2" > "$RUNNER_TEMP/bin/restic"
+          chmod +x "$RUNNER_TEMP/bin/restic"
+          "$RUNNER_TEMP/bin/restic" version
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          echo "UTSURIGI_AGENT_HUB_TEST_RESTIC=$RUNNER_TEMP/bin/restic" >> "$GITHUB_ENV"
+
+      - name: Check utsurigi-agent-hub
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked -- --test-threads=1
+          cargo run --locked -- validate --template
+
+      - name: Check optional utsurigi-memory
+        run: |
+          python3 .github/scripts/check-utsurigi-memory.py --self-test
+          python3 .github/scripts/check-utsurigi-memory.py optional/utsurigi-memory.zip
+          unzip -q optional/utsurigi-memory.zip -d "$RUNNER_TEMP/utsurigi-memory"
+          bash -n "$RUNNER_TEMP/utsurigi-memory/utsurigi-memory/build.sh"
+          bash -n "$RUNNER_TEMP/utsurigi-memory/utsurigi-memory/utsurigi-memory"
+          curl -fsSL https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-1.24.2.tgz -o "$RUNNER_TEMP/onnxruntime.tgz"
+          echo "43725474ba5663642e17684717946693850e2005efbd724ac72da278fead25e6  $RUNNER_TEMP/onnxruntime.tgz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/onnxruntime.tgz" -C "$RUNNER_TEMP"
+          export ORT_LIB_PATH="$RUNNER_TEMP/onnxruntime-linux-x64-1.24.2/lib"
+          export ORT_PREFER_DYNAMIC_LINK=1
+          export RUSTFLAGS="-C link-arg=-Wl,-rpath,$ORT_LIB_PATH"
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/utsurigi-memory-target"
+          cd "$RUNNER_TEMP/utsurigi-memory/utsurigi-memory"
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked

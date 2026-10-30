@@ -1,0 +1,7 @@
+/.tmp/
+/.herdrpowers/
+/.worktrees/
+/target/
+/.utsurigi-agent-hub/
+/bot-config.local.yaml
+/.env

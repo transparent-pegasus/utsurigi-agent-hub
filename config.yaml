@@ -1,0 +1,84 @@
+version: 1
+hub: default # Choose before setup; names that look numeric must be quoted.
+# Host policies: existing instructions win; feature choices follow knowledge/practices.md.
+language: null
+timezone: null
+bot:
+  id: null
+  platform: null
+  runtime_id: null # Generate once; host stops the prior runtime before handover.
+  role: null # AI policy.
+machine:
+  id: null # Host policy: reuse an existing machine ID; leave unset if unavailable.
+  root: null # Host policy: reuse the existing shared management location.
+storage:
+  provider: r2 # CLI: r2 or local.
+  class: standard # Operator policy; no extra S3 header.
+  # Host provisions the bucket and delivers object-scoped AWS credentials.
+  credentials_ref: null
+  bot_transfer: null # Host policy: remote destinations and transfer/recovery policy.
+secrets:
+  provider: 1password # Host policy; other providers are allowed.
+  confirm_each_access: false # Host policy.
+encryption:
+  executable: restic
+  version: 0.19.1
+repositories:
+  shared:
+    url: null
+    password_ref: null
+    password_env: null # Environment variable name, never a password.
+  bot:
+    url: null
+    password_ref: null
+    password_env: null
+paths:
+  owned: null
+  shared: null # Owner's authoring tree; imports never replace it.
+  imports: null
+  state: null
+data:
+  include: [] # Explicit paths relative to owned.
+  exclude: [] # Additional glob exclusions.
+  sqlite_snapshots: [] # Host exports these consistently and keeps them quiescent.
+  # AI policies, never shell commands.
+  sync: null
+  reference: null
+  local: null
+sharing:
+  bot_data: true
+sync:
+  interval_seconds: 86400
+  start_time: "03:00"
+  history_retention_seconds: 2592000
+  retry_lock_seconds: 120 # Bounded lock wait; zero disables waiting.
+  transport_retries: 5 # restic backend retries; whole writes are not replayed.
+  stuck_request_timeout_seconds: 300
+  upload_limit_kib: 0 # Zero uses restic's unlimited rate.
+  download_limit_kib: 0
+  connections: 5
+  read_concurrency: 2
+budget:
+  free_tier_only: true
+  max_bots: 50
+  storage_target_gb: 5 # Host planning target, not an audited spending cap.
+  # Private JSON: expires_at, repositories, max_source_bytes.
+  # Host verifies billing/quota and encryption overhead before issuing permission.
+  attestation_file: null
+# The remaining sections are AI policies; the CLI does not install or run them.
+tasks:
+  enabled: true
+memory:
+  enabled: false
+  embedding_model: null
+  retrieval_bot_id: null
+  existing_source: null
+skills:
+  caveman:
+    enabled: true
+    source: https://github.com/JuliusBrussee/caveman.git
+    ref: null
+review:
+  reviewer_bot: null
+onboarding:
+  config_blob_url: null
