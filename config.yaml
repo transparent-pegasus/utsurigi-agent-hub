@@ -14,7 +14,8 @@ machine:
 storage:
   provider: r2 # CLI: r2 or local.
   class: standard # Operator policy; no extra S3 header.
-  # Host provisions the bucket and delivers object-scoped AWS credentials.
+  # Host provisions the bucket and injects object-scoped AWS credentials securely.
+  # Keep credentials in 1Password/another secrets SaaS or the Bot's Vault service.
   credentials_ref: null
   bot_transfer: null # Host policy: remote destinations and transfer/recovery policy.
 secrets:
@@ -35,8 +36,10 @@ repositories:
 paths:
   owned: null
   shared: null # Owner's authoring tree; imports never replace it.
-  imports: null
-  state: null
+  imports: null # Same absolute root for all authorized Bots in one hub+machine.
+  # Shared imports use versions/<snapshotID>/ and an atomic CURRENT pointer.
+  # Reuse unchanged snapshots; retain current/previous with flock protection.
+  state: null # Per-Bot state and locks; never share this root across Bots.
 data:
   include: [] # Explicit paths relative to owned.
   exclude: [] # Additional glob exclusions.

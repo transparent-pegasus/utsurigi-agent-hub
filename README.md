@@ -3,6 +3,8 @@
 Named hubs for encrypted data and shared knowledge across personal AI platforms.
 
 Give your Bot the [Bot instructions](BOT.md) to get started.
+Setup, operations, and recovery guides load only when needed:
+[INIT](INIT.md), [OPS](OPS.md), [RECOVERY](RECOVERY.md).
 
 ## Features
 
@@ -16,21 +18,28 @@ Give your Bot the [Bot instructions](BOT.md) to get started.
 
 Task management, [Memory RAG](optional/README.md), Caveman. Tasks and Caveman default on; RAG off.
 
-## Policies
+## Credentials and recovery
 
-Follow native instructions. Prefer native features; optionally adopt compatible
-improvements or missing capabilities.
-Initialize with shared [principles](knowledge/principles.md) and [practices](knowledge/practices.md):
+Store cloud credentials and repository passwords in 1Password or another secrets
+SaaS, the Bot's Vault service, or both. Keep recoverable credential references and
+repository locations there so recovery survives host loss. Inject secrets securely;
+never put values in chat, commands, logs, or YAML. See [setup](INIT.md).
 
-- Use Rust by default.
-- Prefer capable connectors; otherwise use authorized computer automation.
-- Prefer native Bot scheduling for periodic tasks.
-- Preserve data externalization; review everything else on schedule or capability changes and propose revisions.
-- Prefer policies when procedures are incomplete or unsuitable. Let agents choose the steps.
-- Bound retries for transient network failures. Back off reads; reconcile uncertain writes before retrying.
+Investigate each environment's file-sharing facilities. Give authorized Bots in
+one hub+machine the same `paths.imports` root. Shared knowledge uses stable
+`versions/<snapshotID>/` names, reuses unchanged snapshots, and switches `CURRENT`
+atomically. Keep current and previous versions with `flock` protection.
+Choose the location for the environment; no Bot-specific layout is required.
+
+Restic deduplicates data. Small SQLite changes may upload the entire database;
+per-record incremental transfer and fixed sync latency are not guaranteed.
+
+## Requirements
 
 Bundled cloud scripts: R2 only. For S3, Google Cloud Storage, Google Drive, etc.,
 write your own or ask your Bot to build them through dialogue.
 
 For trusted Bots under one owner. Requires Unix and Rust.
 Validated on Linux only.
+Optional memory also needs C/C++ build tools; on Debian, run `apt install g++`.
+See [optional memory](optional/README.md) for runtime and migration requirements.
