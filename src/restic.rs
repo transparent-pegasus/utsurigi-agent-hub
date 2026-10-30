@@ -19,6 +19,8 @@ pub struct Restic<'a> {
 
 #[derive(Deserialize)]
 pub struct Snapshot {
+    // `cat snapshot` omits the ID; `snapshots` validates it separately.
+    #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub hostname: String,
@@ -26,6 +28,40 @@ pub struct Snapshot {
     pub time: String,
     #[serde(default)]
     pub tags: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct BackupMessage {
+    message_type: String,
+    snapshot_id: Option<String>,
+}
+
+fn backup_snapshot_id(bytes: &[u8]) -> Result<String> {
+    let invalid = || {
+        Error::new(
+            "Invalid restic backup summary; no completion marker was added; no write was replayed",
+        )
+    };
+    let mut id = None;
+    for message in serde_json::Deserializer::from_slice(bytes).into_iter::<BackupMessage>() {
+        let message = message.map_err(|_| invalid())?;
+        if id.is_some() {
+            return Err(invalid());
+        }
+        match message.message_type.as_str() {
+            "summary" => {
+                id = Some(
+                    message
+                        .snapshot_id
+                        .filter(|id| snapshot_id(id))
+                        .ok_or_else(invalid)?,
+                );
+            }
+            "status" | "verbose_status" => (),
+            _ => return Err(invalid()),
+        }
+    }
+    id.ok_or_else(invalid)
 }
 
 impl Snapshot {
@@ -99,6 +135,84 @@ fn find_executable(path: &Path) -> Option<PathBuf> {
             .map(|dir| dir.join(path))
             .find(|candidate| candidate.is_file())
     })
+}
+
+fn sensitive_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    [
+        "password",
+        "passwd",
+        "token",
+        "secret",
+        "credential",
+        "access_key",
+        "api_key",
+        "authorization",
+    ]
+    .iter()
+    .any(|label| name.contains(label))
+}
+
+fn stderr_line(config: &Config, repository: &Repository, bytes: &[u8]) -> String {
+    let mut private_values: Vec<String> = std::env::vars_os()
+        .filter(|(name, _)| sensitive_name(&name.to_string_lossy()))
+        .map(|(_, value)| value.to_string_lossy().into_owned())
+        .collect();
+    for repository in [
+        repository,
+        &config.repositories.shared,
+        &config.repositories.bot,
+    ] {
+        private_values.extend(repository.url.iter().cloned());
+        private_values.extend(repository.password_ref.iter().cloned());
+        if let Some(value) = repository
+            .password_env
+            .as_deref()
+            .and_then(std::env::var_os)
+        {
+            private_values.push(value.to_string_lossy().into_owned());
+        }
+    }
+    private_values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    let mut diagnostic = String::from_utf8_lossy(bytes).into_owned();
+    for value in private_values.iter().filter(|value| !value.is_empty()) {
+        diagnostic = diagnostic.replace(value, "[redacted]");
+    }
+    let first: String = diagnostic
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let mut words = Vec::new();
+    for word in first.split_whitespace() {
+        if sensitive_name(word) || word.eq_ignore_ascii_case("bearer") {
+            // Unknown credential fields can contain quoted or whitespace-separated values.
+            words.push("[redacted]");
+            break;
+        }
+        words.push(
+            if word.contains("://") || word.contains('@') || word.starts_with("s3:") {
+                "[redacted]"
+            } else {
+                word
+            },
+        );
+    }
+    let mut line = words.join(" ");
+    if line.is_empty() {
+        return "no diagnostic".into();
+    }
+    if line.len() > 512 {
+        let mut end = 512;
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        line.truncate(end);
+        line.push_str("...");
+    }
+    line
 }
 
 impl<'a> Restic<'a> {
@@ -218,8 +332,23 @@ impl<'a> Restic<'a> {
         let output = self.output(repository, arguments, cwd)?;
         if !output.status.success() {
             let code = output.status.code().unwrap_or(1);
+            let meaning = match code {
+                3 => "source files could not be read",
+                10 => "repository does not exist",
+                11 => "repository is locked",
+                12 => "incorrect password",
+                _ => "operation failed",
+            };
+            let kind = if repository.url == self.config.repositories.shared.url {
+                "shared"
+            } else {
+                "bot"
+            };
+            let diagnostic = stderr_line(self.config, repository, &output.stderr);
             return Err(Error {
-                message: format!("restic operation failed (exit {code}); no write was replayed"),
+                message: format!(
+                    "restic {kind} repository operation failed (exit {code}: {meaning}); no write was replayed; stderr: {diagnostic}"
+                ),
                 code,
             });
         }
@@ -227,7 +356,11 @@ impl<'a> Restic<'a> {
     }
 
     pub fn snapshots(&self, repository: &Repository) -> Result<Vec<Snapshot>> {
-        let bytes = self.run(repository, &["snapshots".into(), "--json".into()], None)?;
+        let bytes = self.run(
+            repository,
+            &["snapshots".into(), "--json".into(), "--no-lock".into()],
+            None,
+        )?;
         let snapshots: Vec<Snapshot> = serde_json::from_slice(&bytes)
             .map_err(|_| Error::new("Invalid restic snapshot response"))?;
         if snapshots.iter().any(|s| !snapshot_id(&s.id)) {
@@ -257,7 +390,11 @@ impl<'a> Restic<'a> {
     }
 
     pub fn repository_id(&self, repository: &Repository) -> Result<String> {
-        let bytes = self.run(repository, &["cat".into(), "config".into()], None)?;
+        let bytes = self.run(
+            repository,
+            &["cat".into(), "config".into(), "--no-lock".into()],
+            None,
+        )?;
         let value: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|_| Error::new("Invalid restic repository identity"))?;
         value
@@ -270,7 +407,7 @@ impl<'a> Restic<'a> {
 
     pub fn backup(&self, repository: &Repository, export: &Export, kind: &str) -> Result<()> {
         // Reconcile existing snapshots first; never retry an ambiguous whole write.
-        self.snapshots(repository)?;
+        let existing = self.snapshots(repository)?;
         let run_tag = format!(
             "run:{}",
             export
@@ -280,6 +417,14 @@ impl<'a> Restic<'a> {
                 .expect("temporary directory")
                 .to_string_lossy()
         );
+        if existing
+            .iter()
+            .any(|snapshot| snapshot.tags.contains(&run_tag))
+        {
+            return Err(Error::new(
+                "Backup run already exists; no write was replayed",
+            ));
+        }
         let mut arguments: Vec<OsString> = vec![
             "backup".into(),
             "--json".into(),
@@ -300,33 +445,79 @@ impl<'a> Restic<'a> {
             arguments.push(tag.into());
         }
         arguments.push(".".into());
-        self.run(repository, &arguments, Some(export.tree.path()))?;
-        let snapshots = self.snapshots(repository)?;
-        let matching: Vec<_> = snapshots
+        let output = self.run(repository, &arguments, Some(export.tree.path()))?;
+        let id = backup_snapshot_id(&output)?;
+        if existing
             .iter()
-            .filter(|s| s.tags.contains(&run_tag) && s.owned_by(self.config.id(), kind))
-            .collect();
-        if matching.len() != 1 {
+            .any(|snapshot| snapshot.id.eq_ignore_ascii_case(&id))
+        {
             return Err(Error::new(
-                "Completed write could not be reconciled; no completion marker was added",
+                "Backup summary identifies an existing snapshot; no completion marker was added",
             ));
         }
-        let id = &matching[0].id;
+        // Explicit IDs bypass restic's tag filters. Validate the immutable object before tagging.
+        let bytes = self.run(
+            repository,
+            &[
+                "cat".into(),
+                "snapshot".into(),
+                id.clone().into(),
+                "--no-lock".into(),
+            ],
+            None,
+        )?;
+        let snapshot: Snapshot = serde_json::from_slice(&bytes).map_err(|_| {
+            Error::new("Invalid restic backup snapshot; no completion marker was added")
+        })?;
+        let expected = [
+            ("hub:", self.config.hub.as_str()),
+            ("bot:", self.config.id()),
+            ("runtime:", self.config.runtime_id()),
+            ("kind:", kind),
+            ("run:", run_tag.strip_prefix("run:").expect("run tag")),
+        ];
+        let matches_write = |snapshot: &Snapshot| {
+            snapshot.owned_by(self.config.id(), kind)
+                && expected.iter().all(|(prefix, value)| {
+                    snapshot
+                        .tags
+                        .iter()
+                        .filter_map(|tag| tag.strip_prefix(prefix))
+                        .eq([*value])
+                })
+        };
+        if !matches_write(&snapshot)
+            || snapshot
+                .tags
+                .iter()
+                .any(|tag| tag.starts_with("completed:"))
+        {
+            return Err(Error::new(
+                "Backup snapshot does not match this write; no completion marker was added",
+            ));
+        }
+        let completed_at = chrono::Utc::now().timestamp();
         self.run(
             repository,
             &[
                 "tag".into(),
                 "--add".into(),
-                format!("completed:{}", chrono::Utc::now().timestamp()).into(),
+                format!("completed:{completed_at}").into(),
                 id.into(),
             ],
             None,
         )?;
-        self.snapshots(repository)?
+        let mut matching = self
+            .snapshots(repository)?
             .into_iter()
-            .find(|s| s.tags.contains(&run_tag) && s.completed_at().is_some())
-            .map(|_| ())
-            .ok_or_else(|| Error::new("Completion marker could not be reconciled"))
+            .filter(|snapshot| snapshot.tags.contains(&run_tag));
+        let completed = matching.next().filter(|snapshot| {
+            matches_write(snapshot) && snapshot.completed_at() == Some(completed_at)
+        });
+        if completed.is_none() || matching.next().is_some() {
+            return Err(Error::new("Completion marker could not be reconciled"));
+        }
+        Ok(())
     }
 
     pub fn restore(&self, repository: &Repository, id: &str, destination: &Path) -> Result<()> {
