@@ -6,8 +6,9 @@ when: Sync, backup, share, include/exclude, schedule, or cleanup requested.
 
 Run commands with `--config <bot YAML>`; inspect `status` JSON first.
 `ready` means configuration fields are complete, not remote health or successful
-setup. `next_action` and `remediation` guide the next step; timestamps describe
-local operations. For any nonzero exit, read [RECOVERY.md](RECOVERY.md).
+setup. `next_action` is a string: `configure`, `setup`, `sync`, or `wait`.
+`remediation` is an array of strings; timestamps describe local operations.
+For any nonzero exit, read [RECOVERY.md](RECOVERY.md).
 
 ## Publish and consume
 
@@ -19,14 +20,19 @@ owner pull; private Bots route proposals through the user. Consume only the veri
 absolute version path in `status.active_shared`, never staging or an incomplete
 import. Fetch peer data on demand with `pull BOT_ID --destination NEW_DIRECTORY`.
 
-All Bots in one hub+machine use the same `paths.imports` root. Before restore,
-compare the latest complete restic snapshot ID (SHA-256) with the validated cached
-version; reuse an unchanged snapshot without restoring it again. A new snapshot
-is restored and verified as `versions/<snapshotID>/`, then `CURRENT` switches
-atomically. `status.active_shared` resolves that validated version's absolute path
-for the hub+machine, rather than a Bot-specific copy. No symlink is required.
-Keep only current and previous versions. Use `flock` to coordinate readers,
-switching, and deletion; never remove a version still in use.
+All Bots in one hub+machine use the same `paths.imports` root. The managed root is
+`paths.imports/<SHA-256(hub)>/`. It contains `versions/<snapshotID>/`, JSON `CURRENT`
+(`hub`, `current`, `previous`), and `operation.lock`.
+Before restore, compare the latest complete restic snapshot's full SHA-256 ID with
+the validated cached version; reuse a matching ID without restoring it again.
+A new snapshot is restored and verified under `versions/<snapshotID>/`, then
+`CURRENT` switches atomically. `status.active_shared` resolves that validated
+version's absolute path for the hub+machine. Keep current and previous versions.
+
+Hosts/Bots must hold a shared `flock` on the managed root's `operation.lock`
+throughout long reads. After acquiring it, reread `status.active_shared` and use
+that version. CLI updates and garbage collection hold the exclusive lock.
+Without this coordination, an old version path cannot be retained indefinitely.
 
 ## Sync and schedule
 

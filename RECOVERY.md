@@ -26,6 +26,15 @@ password error does not prove an earlier write failed. Authentication,
 configuration, and integrity failures need correction. Consult
 [practices](knowledge/practices.md) for transport retry policy.
 
+## Shared-cache migration
+
+The new CLI does not treat a Bot's old random `status.active_shared` (`shared-*`)
+path as authoritative. Run the new `setup` to publish the stable cache layout.
+Old `shared-*` directories are not deleted automatically. Before cleaning them up,
+stop old runtimes/readers, verify the new `status.active_shared` references, and
+identify each cache as an old CLI artifact. Remove only those identified caches;
+never delete arbitrary imports in bulk.
+
 ## Restore and handover
 
 Before handover, preserve unfinished work and stop the old runtime. The owner

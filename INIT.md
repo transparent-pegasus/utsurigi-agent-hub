@@ -73,8 +73,10 @@ For each hub+machine, configure the same absolute `paths.imports` root in every
 Bot YAML. Investigate the environment's sharing facilities and permissions first;
 choose an authorized common folder or native knowledge facility. No Bot-specific
 layout is required. Use distinct roots for different hubs or machines.
-The shared cache uses stable `versions/<snapshotID>/` directories and an atomically
-replaced `CURRENT` pointer; see [operations](OPS.md) for reuse and retention.
+The managed cache root is `paths.imports/<SHA-256(hub)>/`. It holds stable
+`versions/<snapshotID>/` directories using full restic IDs, JSON `CURRENT`
+(`hub`, `current`, `previous`), and `operation.lock`.
+See [operations](OPS.md) for atomic switching, reader locks, reuse, and retention.
 
 Read [config.yaml](config.yaml), then write each Bot's private YAML outside
 checkouts or under ignored `.utsurigi-agent-hub/<hub>/<bot-id>/config.yaml`.

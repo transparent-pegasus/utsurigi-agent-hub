@@ -27,8 +27,9 @@ never put values in chat, commands, logs, or YAML. See [setup](INIT.md).
 
 Investigate each environment's file-sharing facilities. Give authorized Bots in
 one hub+machine the same `paths.imports` root. Shared knowledge uses stable
-`versions/<snapshotID>/` names, reuses unchanged snapshots, and switches `CURRENT`
-atomically. Keep current and previous versions with `flock` protection.
+`versions/<snapshotID>/` names under `paths.imports/<SHA-256(hub)>/`, reuses matching
+snapshot IDs, and switches JSON `CURRENT` atomically. Keep current and previous
+versions; long reads follow the [reader lock protocol](OPS.md#publish-and-consume).
 Choose the location for the environment; no Bot-specific layout is required.
 
 Restic deduplicates data. Small SQLite changes may upload the entire database;

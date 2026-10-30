@@ -37,8 +37,10 @@ paths:
   owned: null
   shared: null # Owner's authoring tree; imports never replace it.
   imports: null # Same absolute root for all authorized Bots in one hub+machine.
-  # Shared imports use versions/<snapshotID>/ and an atomic CURRENT pointer.
-  # Reuse unchanged snapshots; retain current/previous with flock protection.
+  # Managed root: paths.imports/<SHA-256(hub)>/; versions/<full snapshotID>/.
+  # Atomic CURRENT JSON: hub/current/previous; reuse matching snapshot IDs.
+  # Long reads: shared flock on that root's operation.lock, then reread status.active_shared.
+  # Hold through reads; updates/GC take the exclusive lock and keep current/previous.
   state: null # Per-Bot state and locks; never share this root across Bots.
 data:
   include: [] # Explicit paths relative to owned.

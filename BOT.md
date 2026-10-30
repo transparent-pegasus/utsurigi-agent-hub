@@ -12,6 +12,7 @@ the host injects them securely. Never replace existing instructions.
 Use `utsurigi-agent-hub --config <bot YAML> <command>`. Read `status` JSON first;
 consume only verified `status.active_shared`. Only the current runtime publishes
 its Bot data; `registry publish` is owner-only.
+For long shared reads, follow the [reader lock protocol](OPS.md#publish-and-consume).
 
 Read [INIT](INIT.md), [OPS](OPS.md), or [RECOVERY](RECOVERY.md) under the conditions
 above. Load [principles](knowledge/principles.md) always; load [practices](knowledge/practices.md) only for feature/policy decisions or reviews.
