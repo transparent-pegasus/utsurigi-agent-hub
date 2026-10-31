@@ -141,7 +141,7 @@ impl SharedCache {
         pointer == &self.observed
             && pointer
                 .as_ref()
-                .is_none_or(|pointer| !pointer.contains(id) || !self.version(id).is_dir())
+                .is_none_or(|pointer| pointer.current != id || !self.version(id).is_dir())
     }
 
     pub fn publish(self, id: &str) -> Result<()> {
@@ -159,25 +159,26 @@ impl SharedCache {
             return Ok(());
         }
         let version = self.version(id);
-        no_symlinks(&version)?;
-        let pending = self.root.join("pending").join(id);
-        no_symlinks(&pending)?;
-        if !pending.is_dir() {
-            return Err(Error::new(
-                "Complete unpublished shared cache version is missing",
-            ));
+        let source = self
+            .cached(&pointer, id)?
+            .ok_or_else(|| Error::new("Complete unpublished shared cache version is missing"))?;
+        let pending = self.root.join("pending");
+        private_dir(&pending)?;
+        if source != version {
+            // An unreferenced version can remain after a crash before CURRENT was published.
+            // Restore it afresh rather than trusting potentially incomplete local data.
+            if version.exists() {
+                fs::remove_dir_all(&version)?;
+            }
+            fs::rename(source, &version)?;
+            File::open(self.root.join("versions"))?.sync_all()?;
+            File::open(&pending)?.sync_all()?;
         }
-        // An unreferenced version can remain after a crash before CURRENT was published.
-        // Restore it afresh rather than trusting potentially incomplete local data.
-        if version.exists() {
-            fs::remove_dir_all(&version)?;
-        }
-        fs::rename(pending, &version)?;
-        File::open(self.root.join("versions"))?.sync_all()?;
-        File::open(self.root.join("pending"))?.sync_all()?;
-        // Repair a missing referenced directory without changing the pointer or
-        // promoting an older retained snapshot back to current.
-        if pointer.as_ref().is_some_and(|pointer| pointer.contains(id)) {
+        // Repair a missing current directory without changing the pointer.
+        if pointer
+            .as_ref()
+            .is_some_and(|pointer| pointer.current == id)
+        {
             return Ok(());
         }
         let pointer = Pointer {
@@ -211,13 +212,13 @@ impl SharedCache {
         }
         // No staging tree is live outside an exclusive cache section. In-flight
         // operations hold owned metadata and skip publication if CURRENT changed.
-        for entry in fs::read_dir(self.root.join("pending"))? {
+        for entry in fs::read_dir(&pending)? {
             let entry = entry?;
             no_symlinks(&entry.path())?;
             fs::remove_dir_all(entry.path())?;
         }
         File::open(self.root.join("versions"))?.sync_all()?;
-        File::open(self.root.join("pending"))?.sync_all()?;
+        File::open(pending)?.sync_all()?;
         Ok(())
     }
 }

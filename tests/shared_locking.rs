@@ -156,6 +156,41 @@ fn same_snapshot_sync_succeeds_while_an_os_reader_holds_shared_flock() {
 }
 
 #[test]
+fn authoritative_previous_snapshot_becomes_current_without_another_restore() {
+    let (fixture, mut beta) = bots();
+    let first = fixture.active_shared(&beta);
+    let first_id = first.file_name().unwrap().to_str().unwrap();
+    write(fixture.alpha.path("shared").join("knowledge.md"), b"two");
+    fixture.ok(&fixture.alpha, &["registry", "publish"]);
+    fixture.ok(&beta, &["sync"]);
+    let second = fixture.active_shared(&beta);
+    let second_id = second.file_name().unwrap().to_str().unwrap();
+    assert_ne!(first, second);
+    let root = second.parent().unwrap().parent().unwrap();
+    let pointer: Value = serde_json::from_slice(&fs::read(root.join("CURRENT")).unwrap()).unwrap();
+    assert_eq!(pointer["current"], second_id);
+    assert_eq!(pointer["previous"], first_id);
+
+    // Forgetting the newer snapshot makes the retained previous one authoritative.
+    success(&fixture.restic(&fixture.alpha, "shared", &["forget", second_id]));
+    assert_eq!(
+        fixture.ids(&fixture.alpha, "shared"),
+        [first_id.to_owned()].into_iter().collect()
+    );
+    // A cache populated before pending storage existed must also reuse its source.
+    fs::remove_dir(root.join("pending")).unwrap();
+    let tool = tool(&mut beta);
+    fixture.ok(&beta, &["sync"]);
+    assert_eq!(fixture.active_shared(&beta), first);
+    let pointer: Value = serde_json::from_slice(&fs::read(root.join("CURRENT")).unwrap()).unwrap();
+    assert_eq!(pointer["current"], first_id);
+    assert_eq!(pointer["previous"], second_id);
+    assert_eq!(restores(&tool), 0, "reuse the retained previous version");
+    assert_eq!(fs::read(first.join("knowledge.md")).unwrap(), b"one");
+    assert_eq!(fs::read(second.join("knowledge.md")).unwrap(), b"two");
+}
+
+#[test]
 fn changed_snapshot_waits_for_reader_then_two_bots_restore_only_once() {
     let (mut fixture, mut beta) = bots();
     let first = fixture.active_shared(&beta);
