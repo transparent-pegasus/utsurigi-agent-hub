@@ -4,6 +4,7 @@ use crate::history::History;
 use crate::registry::Registry;
 use crate::restic::{Restic, Snapshot, latest};
 use crate::selection;
+use crate::shared::{self, SharedCache};
 use crate::state::{Lock, State, fresh_destination, private_dir};
 use crate::{Action, RegistryAction, RepositoryKind, budget};
 use chrono::Utc;
@@ -12,9 +13,18 @@ use std::path::Path;
 use utsurigi_agent_hub::{retention, schedule};
 
 struct Imported {
-    tree: tempfile::TempDir,
+    tree: Option<tempfile::TempDir>,
     registry: Registry,
     history: History,
+    snapshot: String,
+    cache: SharedCache,
+}
+
+impl Imported {
+    fn publish(self) -> Result<()> {
+        self.cache.publish(&self.snapshot, self.tree)?;
+        Ok(())
+    }
 }
 
 pub fn execute(path: &Path, action: Action) -> Result<()> {
@@ -87,31 +97,59 @@ fn status(config: &Config) -> Result<()> {
     } else {
         State::default()
     };
+    let missing = config.missing();
+    let active_shared = shared::active(config)?;
+    let (next_action, remediation) = if !missing.is_empty() {
+        (
+            "configure",
+            missing
+                .iter()
+                .map(|field| format!("Set {field} in configuration"))
+                .collect::<Vec<_>>(),
+        )
+    } else if state.anchor.is_none() || state.next_due.is_none() || active_shared.is_none() {
+        (
+            "setup",
+            vec!["Run setup to initialize shared files and the schedule".to_owned()],
+        )
+    } else if state
+        .next_due
+        .is_some_and(|due| due <= Utc::now().timestamp())
+    {
+        ("sync", Vec::new())
+    } else {
+        ("wait", Vec::new())
+    };
     println!(
         "{}",
         serde_json::json!({
             "hub": config.hub,
-            "ready": config.missing().is_empty(), "last_success": state.last_success,
-            "anchor": state.anchor, "next_due": state.next_due, "active_shared": state.active_shared,
+            "ready": missing.is_empty(), "last_success": state.last_success,
+            "anchor": state.anchor, "next_due": state.next_due, "active_shared": active_shared,
+            "next_action": next_action, "remediation": remediation,
         })
     );
     Ok(())
 }
 
 fn import_shared(config: &Config, restic: &Restic<'_>) -> Result<Imported> {
+    let cache = SharedCache::open(config)?;
     let snapshots = restic.snapshots(&config.repositories.shared)?;
     let snapshot = latest(&snapshots, "shared").ok_or_else(|| {
         Error::new("No complete shared registry exists; setup by its owner is required")
     })?;
-    let tree = tempfile::Builder::new().prefix("shared-").tempdir_in(
-        config
-            .paths
-            .imports
-            .as_ref()
-            .expect("runtime configuration"),
-    )?;
-    restic.restore(&config.repositories.shared, &snapshot.id, tree.path())?;
-    let registry = Registry::load(tree.path(), config)?;
+    let version = cache.version(&snapshot.id);
+    no_symlinks(&version)?;
+    let tree = if cache.contains(&snapshot.id) {
+        None
+    } else {
+        let tree = cache.staging()?;
+        restic.restore(&config.repositories.shared, &snapshot.id, tree.path())?;
+        Some(tree)
+    };
+    let path = tree.as_ref().map_or(version.as_path(), |tree| tree.path());
+    selection::validate_import(path)?;
+    let registry = Registry::load(path, config)?;
     if !snapshot.owned_by(&registry.owner.bot_id, "shared")
         || !snapshot
             .tags
@@ -121,11 +159,13 @@ fn import_shared(config: &Config, restic: &Restic<'_>) -> Result<Imported> {
             "Shared snapshot ownership does not match its registry",
         ));
     }
-    let history = History::load(tree.path(), &registry)?;
+    let history = History::load(path, &registry)?;
     Ok(Imported {
         tree,
         registry,
         history,
+        snapshot: snapshot.id.clone(),
+        cache,
     })
 }
 
@@ -167,7 +207,7 @@ fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> 
         Err(error) if error.code == 10 => Vec::new(),
         Err(error) => return Err(error),
     };
-    if latest(&snapshots, "shared").is_none() {
+    let imported = if latest(&snapshots, "shared").is_none() {
         let registry = Registry::load(
             config.paths.shared.as_ref().expect("runtime configuration"),
             config,
@@ -241,6 +281,12 @@ fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> 
         history.write(&mut export)?;
         budget::authorize(config, repositories, export.bytes)?;
         restic.backup(&config.repositories.shared, &export, "shared")?;
+        let imported = import_shared(config, restic)?;
+        imported.registry.current(config)?;
+        imported.registry.credentials(config)?;
+        imported.history.check(&imported.registry, restic)?;
+        private_repository(config, restic, &imported.history)?;
+        imported
     } else {
         let mut imported = import_shared(config, restic)?;
         imported.registry.current_runtime(config)?;
@@ -282,10 +328,10 @@ fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> 
         )?;
         restic.initialize(&config.repositories.bot)?;
         private_repository(config, restic, &imported.history)?;
-    }
-    let imported = import_shared(config, restic)?;
+        imported
+    };
     initialize_schedule(config, state)?;
-    state.active_shared = Some(imported.tree.keep());
+    imported.publish()?;
     state.save(config.paths.state.as_ref().expect("runtime configuration"))
 }
 
@@ -321,7 +367,7 @@ fn sync(config: &Config, restic: &Restic<'_>, state: &mut State, scheduled: bool
             completed,
         )?);
     }
-    state.active_shared = Some(imported.tree.keep());
+    imported.publish()?;
     state.save(config.paths.state.as_ref().expect("runtime configuration"))
 }
 

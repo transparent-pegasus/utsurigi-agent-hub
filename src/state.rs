@@ -12,7 +12,8 @@ pub struct State {
     pub last_success: Option<i64>,
     pub anchor: Option<i64>,
     pub next_due: Option<i64>,
-    pub active_shared: Option<PathBuf>,
+    #[serde(default, rename = "active_shared", skip_serializing)]
+    pub _active_shared: Option<PathBuf>,
 }
 
 pub struct Lock {
