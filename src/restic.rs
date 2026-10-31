@@ -153,6 +153,120 @@ fn sensitive_name(name: &str) -> bool {
     .any(|label| name.contains(label))
 }
 
+fn credential_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '_' | '-')
+}
+
+fn redact_value(diagnostic: &str, value: &str) -> String {
+    let mut redacted = String::new();
+    let mut copied = 0;
+    for (start, _) in diagnostic.match_indices(value) {
+        let end = start + value.len();
+        if diagnostic[..start]
+            .chars()
+            .next_back()
+            .is_some_and(credential_char)
+            || diagnostic[end..]
+                .chars()
+                .next()
+                .is_some_and(credential_char)
+        {
+            continue;
+        }
+        redacted.push_str(&diagnostic[copied..start]);
+        redacted.push_str("[redacted]");
+        copied = end;
+    }
+    redacted.push_str(&diagnostic[copied..]);
+    redacted
+}
+
+fn credential_end(value: &str) -> usize {
+    if let Some(quote @ ('\'' | '"')) = value.chars().next() {
+        let mut escaped = false;
+        for (index, c) in value[1..].char_indices() {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == quote {
+                return index + 2;
+            }
+        }
+        return value.len();
+    }
+    // Bare values may contain spaces. Field delimiters end an unquoted value.
+    value.find([';', ',']).unwrap_or(value.len())
+}
+
+fn redact_credentials(line: &str) -> String {
+    let mut redacted = String::new();
+    let mut copied = 0;
+    let mut cursor = 0;
+    while cursor < line.len() {
+        let c = line[cursor..].chars().next().expect("character boundary");
+        if !credential_char(c) {
+            cursor += c.len_utf8();
+            continue;
+        }
+        let start = cursor;
+        cursor += line[cursor..]
+            .find(|c| !credential_char(c))
+            .unwrap_or(line.len() - cursor);
+        let name = &line[start..cursor];
+        let mut rest = &line[cursor..];
+        if let Some(quote @ ('\'' | '"')) = line[..start].chars().next_back()
+            && rest.starts_with(quote)
+        {
+            rest = &rest[1..];
+        }
+        rest = rest.trim_start();
+        let assignment = rest.starts_with(['=', ':']);
+        if assignment {
+            rest = rest[1..].trim_start();
+        }
+        let normalized = name.replace('-', "_").to_ascii_lowercase();
+        let prefix = line[..start].trim_end();
+        let bare_label = normalized.split('_').any(|part| {
+            matches!(
+                part,
+                "password"
+                    | "passwd"
+                    | "token"
+                    | "secret"
+                    | "credential"
+                    | "credentials"
+                    | "authorization"
+            )
+        }) || normalized.contains("access_key")
+            || normalized.contains("api_key");
+        // Bare fields start a clause. Common prose continues after the label.
+        let bare_field = bare_label
+            && line[cursor..].starts_with(char::is_whitespace)
+            && (prefix.is_empty() || prefix.ends_with([':', ';', ',', '{', '[']))
+            && !matches!(
+                rest.split_whitespace().next(),
+                Some("or" | "and" | "is" | "are" | "was" | "were" | "file" | "files")
+            );
+        if (sensitive_name(&normalized)
+            && (assignment
+                || name.starts_with("--")
+                || rest.starts_with(['\'', '"'])
+                || bare_field))
+            || name.eq_ignore_ascii_case("bearer")
+        {
+            let value_start = line.len() - rest.len();
+            let end = value_start + credential_end(rest);
+            redacted.push_str(&line[copied..value_start]);
+            redacted.push_str("[redacted]");
+            copied = end;
+            cursor = end;
+        }
+    }
+    redacted.push_str(&line[copied..]);
+    redacted
+}
+
 fn stderr_line(config: &Config, repository: &Repository, bytes: &[u8]) -> String {
     let mut private_values: Vec<String> = std::env::vars_os()
         .filter(|(name, _)| sensitive_name(&name.to_string_lossy()))
@@ -176,7 +290,7 @@ fn stderr_line(config: &Config, repository: &Repository, bytes: &[u8]) -> String
     private_values.sort_by_key(|value| std::cmp::Reverse(value.len()));
     let mut diagnostic = String::from_utf8_lossy(bytes).into_owned();
     for value in private_values.iter().filter(|value| !value.is_empty()) {
-        diagnostic = diagnostic.replace(value, "[redacted]");
+        diagnostic = redact_value(&diagnostic, value);
     }
     let first: String = diagnostic
         .lines()
@@ -185,27 +299,24 @@ fn stderr_line(config: &Config, repository: &Repository, bytes: &[u8]) -> String
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
-    let mut words = Vec::new();
-    for word in first.split_whitespace() {
-        if sensitive_name(word) || word.eq_ignore_ascii_case("bearer") {
-            // Unknown credential fields can contain quoted or whitespace-separated values.
-            words.push("[redacted]");
-            break;
-        }
-        words.push(
+    let diagnostic = redact_credentials(&first);
+    let mut line = diagnostic
+        .split_whitespace()
+        .map(|word| {
             if word.contains("://") || word.contains('@') || word.starts_with("s3:") {
-                "[redacted]"
+                let body = word.trim_end_matches([';', ',', ')', ']', '}', '\'', '"']);
+                format!("[redacted]{}", &word[body.len()..])
             } else {
-                word
-            },
-        );
-    }
-    let mut line = words.join(" ");
+                word.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
     if line.is_empty() {
         return "no diagnostic".into();
     }
     if line.len() > 512 {
-        let mut end = 512;
+        let mut end = 512 - "...".len();
         while !line.is_char_boundary(end) {
             end -= 1;
         }
