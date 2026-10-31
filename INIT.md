@@ -88,10 +88,10 @@ them with no individual confirmation. Ask only for missing required facts or
 unresolved choices that change permissions.
 
 - Infer reliable `language`, `timezone`, `bot.platform`, and host capabilities.
-  Derive `bot.id` from the opening answer, `bot.runtime_id`, and `bot.role`;
-  reuse the existing Bot ID for continuation. Infer the role from existing
-  instructions; ask if the role is unavailable. Reuse the same runtime's ID;
-  generate once for a new runtime and stop the prior runtime before handover.
+  Derive `bot.id` from the opening answer; reuse the existing Bot ID for
+  continuation. Infer `bot.role` from existing instructions; ask if the role is
+  unavailable. Reuse `bot.runtime_id` for the same runtime; generate once for a
+  new runtime and stop the prior runtime before handover.
 - Investigate `machine.id`, `machine.root`, and `paths.*` as described below.
 - Derive `storage.credentials_ref` and `repositories.*` URL, `password_ref`, and
   `password_env` values only after the store and account are approved. Generate
