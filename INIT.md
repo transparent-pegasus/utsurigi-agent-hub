@@ -32,21 +32,93 @@ readable by the host.
 
 ## Dialogue and configuration
 
-Infer reliable language, timezone, host capabilities, and existing settings.
-Ask only for missing Bot identity, hub membership, storage access, secret access,
-data scope, or adoption choices that would change existing behavior; combine related
-gaps.
+Always begin: "Is this a new Bot or a continuation of an existing Bot?" Ask even
+when inferable. For continuation, reuse that Bot's ID and approved decisions for
+the same owner, hub, and purpose. Group related questions into 1–2 exchanges,
+including this opening question.
+
+Template values are unselected candidates, not consent. Ask about unsettled
+decisions even when YAML is populated. `Config::missing` and `ready` do not check
+ASK agreement; missing/null checks cannot replace this dialogue.
+
+**ASK** about unsettled choices:
+
+- `hub`: "Which authorized hub should this Bot join, or should we create one
+  (initial candidate: `default`)?"
+
+- `storage.provider`: "Which backup destination and account should we use: R2
+  (account and bucket), an authorized Drive, S3, or another store?"
+
+- `secrets.provider`: "Which service, account, and place should hold backup
+  credentials and recovery passwords: 1Password, the Bot's Vault, or another
+  store? How will we recover if this host is lost?" Never request secret values
+  in chat; use secure connection facilities.
+
+- `data.include`: Investigate concrete candidates first. "May we back up A and B,
+  keep C as an external reference, and keep regenerable D local? What should we
+  add or exclude? What common knowledge may enter the shared authoring scope
+  (`paths.shared`)?" `data.include`/`data.exclude` cover Bot-owned data; they do
+  not limit the shared authoring scope.
+
+- `sharing.bot_data`: "May authorized Bots in this hub retrieve this Bot's
+  backed-up data (default: `true`)?" If kept private, backup and access to the
+  hub's common knowledge continue.
+
+- `tasks.enabled`, only for new adoption: "Should this framework also record
+  and track tasks (default: `true`)?" Preserve existing methods and unfinished
+  tasks; reuse approved operation without asking again.
+
+- `skills.caveman.enabled`, only at hub initialization: "Should this hub use
+  Caveman to shorten responses (default: `true`)? Existing instructions take
+  priority; proxy, gateway, and model-routing features are excluded." Record
+  the answer in hub knowledge and each Bot's YAML; joining Bots reuse it.
+
+- `storage.bot_transfer`, only for `local` storage or when an external destination
+  or transfer policy needs deciding: "Which destination and automatic or assisted
+  transfer and recovery policy should we use?" Local snapshots do not prove
+  external backup completion.
+
+- `budget.free_tier_only`, only after the free tier is proven insufficient:
+  "Should we reduce scope to fit the free tier, or authorize paid use?" Never
+  silently set it to `false`; hold writes while costs or authorization remain
+  unresolved.
+
+**INFER** technical values from facts and approved choices; investigate and record
+them with no individual confirmation. Ask only for missing required facts or
+unresolved choices that change permissions.
+
+- Infer reliable `language`, `timezone`, `bot.platform`, and host capabilities.
+  Derive `bot.id` from the opening answer, `bot.runtime_id`, and `bot.role`;
+  reuse the existing Bot ID for continuation. Infer the role from existing
+  instructions; ask if the role is unavailable. Reuse the same runtime's ID;
+  generate once for a new runtime and stop the prior runtime before handover.
+- Investigate `machine.id`, `machine.root`, and `paths.*` as described below.
+- Derive `storage.credentials_ref` and `repositories.*` URL, `password_ref`, and
+  `password_env` values only after the store and account are approved. Generate
+  opaque repository paths when new ones are needed.
+- Derive `data.exclude`, `data.sync`, `data.reference`, `data.local`, and
+  `data.sqlite_snapshots` from approved scope and verified consistent exports.
+- Resolve `encryption.executable`, `budget.attestation_file`, `skills.caveman.ref`
+  when enabled, and `onboarding.config_blob_url` from verified resources.
+- Record `memory.existing_source` and `memory.retrieval_bot_id`; infer
+  `memory.embedding_model` only when framework RAG is adopted.
+
+**YAML-ONLY**: preserve current values or template defaults; do not reset prior
+approved settings. No setup questions or automatic tuning for schema `version`,
+structure keys, `storage.class`, `encryption.version`, `sync.*` (interval, start
+time, retention, retry, transport, timeout, bandwidth, concurrency),
+`budget.max_bots`, `budget.storage_target_gb`, `secrets.confirm_each_access`,
+`memory.enabled` (default: `false`), `skills.caveman.source`, or `review.reviewer_bot`.
+
 Check existing same-owner authorized configurations and durable secret/repository
-references. With the user, select an existing authorized hub or create and name one
-before initializing storage. The sole initial candidate is `default`, which may be
+references. Reuse the approved hub; if unsettled, select an existing authorized hub
+or create and name one with the user before initializing storage.
+The sole initial candidate is `default`, which may be
 kept; never infer a hub from the platform. Names must be unique within the owner's
 managed hubs and use 1–128 ASCII letters, digits, `.`, `_`, or `-`, excluding `.`
 and `..`. Quote numeric-looking names in YAML. A stored hub name is stable;
 editing one YAML is not a supported rename.
-At hub initialization, ask whether to enable Caveman (default: `true`). Record the
-answer in hub knowledge and each Bot's `skills.caveman.enabled`; joining Bots reuse it.
-Generate runtime IDs and opaque repository paths. Keep optional defaults unless
-requested. Preserve existing memory sources and direct or delegated retrieval
+Preserve existing memory sources and direct or delegated retrieval
 choices. Record applicable sources in `memory.existing_source` and delegated
 retrieval Bots in `memory.retrieval_bot_id`, each as one prose string, not a list
 or object. Preserving an existing system must not silently enable framework RAG
@@ -103,10 +175,10 @@ HOME) and an isolated cache/socket. Private Bot access still applies within each
 Host-provisioned access, repositories, and data roots enforce hub scope; name
 checks catch mistakes and do not replace permissions.
 
-For detailed setup, derive and verify the YAML's GitHub blob URL from the actual
-repository and revision. Record it in `onboarding.config_blob_url`, offer it for
-editing, and request the edited YAML upload. Until the file is published, offer
-the bundled YAML instead.
+Only if the user requests detailed setup, offer YAML editing and an edited upload.
+Derive and verify the YAML's GitHub blob URL from the actual repository and revision;
+record it in `onboarding.config_blob_url`. Until published, offer the bundled YAML.
+Dialogue-only users need no YAML editing or upload.
 
 Keep repository passwords and cloud credentials in 1Password or another secrets
 SaaS, the Bot's Vault service, or both. Recovery credentials and repository locations
@@ -176,9 +248,17 @@ the selected hub. Bot IDs are unique within a hub's registry and may be reused i
 separate hubs. Each Bot membership gets its own repository; that hub's shared
 knowledge has another.
 The registry owner publishes admissions and policy changes; joining
-Bots consume that registry. Prepare the allowlisted files, validate the local
-configuration, invoke `setup`, then verify one `sync` and recovery before
-scheduling.
+Bots consume that registry.
+
+**Confirm once.** At the end of the dialogue, show ASK answers and INFER results
+in one concise list and get one confirmation. Include the current
+`secrets.confirm_each_access` value; vendor approval still applies. Show
+"Framework RAG is disabled; can enable on request" for the normal default;
+honor any existing approved RAG state. Add one line: "Details are configurable
+in YAML."
+
+Prepare the allowlisted files, validate the local configuration, invoke `setup`,
+then verify one `sync` and recovery before scheduling.
 
 ## Optional capabilities
 
