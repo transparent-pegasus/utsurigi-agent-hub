@@ -3,6 +3,7 @@ mod common;
 use chrono::Timelike;
 use common::*;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
@@ -1839,7 +1840,7 @@ case "$operation" in
     cat) exec "$tool/real-restic" --no-cache --repo "$repository" cat config ;;
     snapshots)
         [ -f "$tool/published-registry.yaml" ] || exit 10
-        printf '%s\n' '[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","time":"2026-10-30T00:00:00Z","hostname":"alpha","tags":["utsurigi-agent-hub","hub:default","kind:shared","bot:alpha","runtime:alpha-1","completed:1"]}]'
+        printf '[{"id":"%s","time":"2026-10-30T00:00:00Z","hostname":"alpha","tags":["utsurigi-agent-hub","hub:default","kind:shared","bot:alpha","runtime:alpha-1","completed:1"]}]\n' "$(cat "$tool/snapshot-id")"
         ;;
     restore)
         cp "$tool/published-registry.yaml" "$target/registry.yaml"
@@ -1890,7 +1891,13 @@ fn registry_privacy_stage_registry(fixture: &Fixture, tool: &Path, registry: &Pa
     }
 
     // A valid projection must reach peer access, so bad metadata cannot explain a privacy rejection.
-    fs::write(tool.join("published-registry.yaml"), shared.to_string()).unwrap();
+    let shared = shared.to_string();
+    fs::write(tool.join("published-registry.yaml"), &shared).unwrap();
+    fs::write(
+        tool.join("snapshot-id"),
+        format!("{:x}", Sha256::digest(shared.as_bytes())),
+    )
+    .unwrap();
     let destination = fixture.temp.path().join("privacy-fixture-positive-control");
     let output = fixture.cli(
         &fixture.alpha,
@@ -1916,6 +1923,12 @@ fn registry_privacy_stage_registry(fixture: &Fixture, tool: &Path, registry: &Pa
     );
     assert_no_writes(tool);
     assert!(!destination.exists());
+    // Changed registry bytes represent a different immutable snapshot, even after a failed pull.
+    fs::write(
+        tool.join("snapshot-id"),
+        format!("{:x}", Sha256::digest(&published)),
+    )
+    .unwrap();
     fs::write(tool.join("published-registry.yaml"), published).unwrap();
     for name in ["calls", "peer-reads", "identity-reads"] {
         fs::write(tool.join(name), "").unwrap();
@@ -2041,6 +2054,16 @@ fn registry_privacy_reuse_is_refused(command: &str) {
             text(&output)
         );
         let calls = fs::read_to_string(tool.join("calls")).unwrap();
+        if command == "pull" {
+            assert_eq!(
+                calls
+                    .lines()
+                    .filter(|operation| *operation == "restore")
+                    .count(),
+                1,
+                "{command}/{case} must restore the changed registry before credential rejection"
+            );
+        }
         let peer_reads = fs::read_to_string(tool.join("peer-reads")).unwrap();
         let wrote = calls.lines().any(|operation| {
             matches!(
