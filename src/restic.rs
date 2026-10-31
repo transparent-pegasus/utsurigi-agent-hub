@@ -195,8 +195,8 @@ fn credential_end(value: &str) -> usize {
         }
         return value.len();
     }
-    // Bare values may contain spaces. Field delimiters end an unquoted value.
-    value.find([';', ',']).unwrap_or(value.len())
+    // Bare values may contain spaces and punctuation; only quotes give a safe end.
+    value.len()
 }
 
 fn redact_credentials(line: &str) -> String {

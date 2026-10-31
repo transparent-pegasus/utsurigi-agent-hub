@@ -204,30 +204,32 @@ fn wrong_password_explanation_and_password_prose_remain_readable() {
 }
 
 #[test]
-fn credential_assignments_redact_values_and_keep_following_diagnostics() {
+fn credential_fields_redact_values_and_preserve_explicit_boundaries() {
     let mut fixture = Fixture::new();
     let directory = failing_restic(&mut fixture, 42, b"");
-    for field in [
-        "password=unlisted-value",
-        "PASSWORD = unlisted-value",
-        "password : unlisted-value",
-        "password = 'unlisted value with spaces'",
-        r#"password = "unlisted value with spaces""#,
-        r#"password = "unlisted \" quoted value""#,
-        r#""api_token": "unlisted value with spaces""#,
-        "'client_secret' : 'unlisted value with spaces'",
-        "custom_credential = unlisted value with spaces",
-        "password 'unlisted value with spaces'",
-        "password unlisted value with spaces",
-        "CUSTOM_API_TOKEN unlisted-value",
-        "AWS_ACCESS_KEY_ID unlisted-value",
-        "api-key unlisted-value",
-        "Authorization unlisted-value",
-        "--password unlisted-value",
-        "--access-key 'unlisted value with spaces'",
-        "Authorization: Bearer unlisted-value",
-        "Bearer unlisted-value",
-        "bearer 'unlisted value with spaces'",
+    for (field, preserve_suffix) in [
+        ("password=unlisted-value", false),
+        ("PASSWORD = unlisted-value", false),
+        ("password : unlisted-value", false),
+        ("password = 'unlisted value with spaces'", true),
+        (r#"password = "unlisted value with spaces""#, true),
+        (r#"password = "unlisted \" quoted value""#, true),
+        (r#""api_token": "unlisted value with spaces""#, true),
+        ("'client_secret' : 'unlisted value with spaces'", true),
+        ("password = 'unlisted,value;with spaces'", true),
+        (r#""api_token": "unlisted,value;with spaces""#, true),
+        ("custom_credential = unlisted value with spaces", false),
+        ("password 'unlisted value with spaces'", true),
+        ("password unlisted value with spaces", false),
+        ("CUSTOM_API_TOKEN unlisted-value", false),
+        ("AWS_ACCESS_KEY_ID unlisted-value", false),
+        ("api-key unlisted-value", false),
+        ("Authorization unlisted-value", false),
+        ("--password unlisted-value", false),
+        ("--access-key 'unlisted value with spaces'", true),
+        ("Authorization: Bearer unlisted-value", false),
+        ("Bearer unlisted-value", false),
+        ("bearer 'unlisted value with spaces'", true),
     ] {
         let diagnostic = format!("Fatal: {field}; repository is locked");
         fs::write(directory.join("stderr"), diagnostic).unwrap();
@@ -238,10 +240,96 @@ fn credential_assignments_redact_values_and_keep_following_diagnostics() {
             assert!(!diagnostic.contains(hidden), "credential exposed: {field}");
         }
         assert!(diagnostic.contains("[redacted]"), "{diagnostic}");
+        assert!(diagnostic.starts_with("Fatal: "), "{diagnostic}");
+        if preserve_suffix {
+            assert!(
+                diagnostic.ends_with("; repository is locked"),
+                "{diagnostic}"
+            );
+        }
+    }
+}
+
+fn assert_unquoted_credential_is_hidden(value: &str, trailing_fragment: &str) {
+    let mut fixture = Fixture::new();
+    let directory = failing_restic(&mut fixture, 42, b"");
+    for field in [
+        format!("password={value}"),
+        format!("custom_credential: {value}"),
+        format!("password {value}"),
+        format!("--password {value}"),
+        format!("Authorization: Bearer {value}"),
+        format!("Bearer {value}"),
+    ] {
+        fs::write(
+            directory.join("stderr"),
+            format!("Fatal: exit_error repository index unavailable; {field}; retry later"),
+        )
+        .unwrap();
+        let output = restore(&fixture, "shared", &[]);
+        failure(&output);
+        assert_eq!(output.status.code(), Some(42));
+        let message = text(&output);
+        assert!(message.contains("shared repository"), "{message}");
+        let diagnostic = stderr_diagnostic(&output);
         assert!(
-            diagnostic.ends_with("; repository is locked"),
+            diagnostic.starts_with("Fatal: exit_error repository index unavailable;"),
             "{diagnostic}"
         );
+        for hidden in ["unlisted", trailing_fragment] {
+            assert!(
+                !diagnostic.contains(hidden),
+                "credential fragment exposed: {field}: {diagnostic}"
+            );
+        }
+        assert!(diagnostic.contains("[redacted]"), "{diagnostic}");
+    }
+}
+
+#[test]
+fn unquoted_credentials_containing_commas_are_hidden() {
+    assert_unquoted_credential_is_hidden("unlisted,comma-tail", "comma-tail");
+}
+
+#[test]
+fn unquoted_credentials_containing_semicolons_are_hidden() {
+    assert_unquoted_credential_is_hidden("unlisted;semicolon-tail", "semicolon-tail");
+}
+
+#[test]
+fn known_delimited_credentials_are_hidden_in_unquoted_fields() {
+    let mut fixture = Fixture::new();
+    let directory = failing_restic(&mut fixture, 42, b"");
+    for value in ["known-head,known-tail", "known-head;known-tail"] {
+        for field in [
+            format!("password={value}"),
+            format!("password={value}-suffix"),
+            format!("password {value}-suffix"),
+            format!("Bearer {value}-suffix"),
+        ] {
+            fs::write(
+                directory.join("stderr"),
+                format!("Fatal: exit_error repository index unavailable; {field}; retry later"),
+            )
+            .unwrap();
+            let output = restore(&fixture, "bot", &[("TEST_HUB_ALPHA_PASSWORD", value)]);
+            failure(&output);
+            assert_eq!(output.status.code(), Some(42));
+            let message = text(&output);
+            assert!(message.contains("bot repository"), "{message}");
+            let diagnostic = stderr_diagnostic(&output);
+            assert!(
+                diagnostic.starts_with("Fatal: exit_error repository index unavailable;"),
+                "{diagnostic}"
+            );
+            for hidden in ["known-head", "known-tail", "suffix"] {
+                assert!(
+                    !diagnostic.contains(hidden),
+                    "known credential fragment exposed: {field}: {diagnostic}"
+                );
+            }
+            assert!(diagnostic.contains("[redacted]"), "{diagnostic}");
+        }
     }
 }
 
@@ -249,15 +337,23 @@ fn credential_assignments_redact_values_and_keep_following_diagnostics() {
 fn short_credentials_are_hidden_in_assignments_bearer_and_urls() {
     let mut fixture = Fixture::new();
     let directory = failing_restic(&mut fixture, 42, b"");
-    for field in [
-        "password=x",
-        "password = 'x'",
-        "password x",
-        "Authorization: Bearer x",
-        "Bearer x",
-        "https://alice:x@trace.example.invalid/private?token=x",
-        "alice:x@trace.example.invalid",
-        "s3:trace.example.invalid/private",
+    for (field, preserve_suffix) in [
+        ("password=x", false),
+        ("password = 'x'", true),
+        ("password x", false),
+        ("Authorization: Bearer x", false),
+        ("Bearer x", false),
+        ("password=x,unlisted", false),
+        ("password=x;unlisted", false),
+        ("password x,unlisted", false),
+        ("Bearer x;unlisted", false),
+        ("password = 'x,unlisted;value'", true),
+        (
+            "https://alice:x@trace.example.invalid/private?token=x",
+            false,
+        ),
+        ("alice:x@trace.example.invalid", true),
+        ("s3:trace.example.invalid/private", true),
     ] {
         fs::write(
             directory.join("stderr"),
@@ -274,10 +370,17 @@ fn short_credentials_are_hidden_in_assignments_bearer_and_urls() {
             "alice",
             "trace.example.invalid",
             "private",
+            "unlisted",
+            "value",
         ] {
             assert!(!diagnostic.contains(hidden), "credential exposed: {field}");
         }
-        assert!(diagnostic.ends_with("; retry later"), "{diagnostic}");
+        if preserve_suffix {
+            assert!(
+                diagnostic.ends_with("; retry later"),
+                "{field}: {diagnostic}"
+            );
+        }
     }
 }
 
