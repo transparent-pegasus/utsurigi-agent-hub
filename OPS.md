@@ -31,10 +31,18 @@ version's absolute path for the hub+machine. Keep current and previous versions.
 
 Hosts/Bots must hold a shared `flock` on the managed root's `operation.lock`
 throughout long reads. After acquiring it, reread `status.active_shared` and use
-that version. CLI updates and garbage collection hold the exclusive lock.
-Without this coordination, an old version path cannot be retained indefinitely.
+that version. Without this coordination, an old version path cannot be retained
+indefinitely.
+
+Cache hits take a shared lock alongside readers. Cache mutations (restore,
+verification, switching, and garbage collection) need the exclusive lock and wait
+up to 30 seconds. The CLI releases the cache lock before Bot-data upload or
+unrelated work. Lock errors name the affected lock path.
 
 ## Sync and schedule
+
+With an initialized schedule but no current shared cache, `next_action` is `sync`.
+An uninitialized schedule still requires `setup`.
 
 Use `sync` for manual backup. Prefer native Bot scheduling to invoke
 `sync --scheduled` often enough to service `status.next_due`.

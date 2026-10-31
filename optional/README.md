@@ -42,11 +42,13 @@ the CLI checks length before model loading or daemon startup and reports an erro
 Do not assume an automatic fallback. Keep sockets local and isolated across hubs
 and private stores; recheck paths when moving machines.
 
-`info`, `list`, and `search` open existing databases read-only. A missing source
-fails without creating a database or its parent directory. Reading a recovery
-destination must not create an empty database that blocks `snapshot DESTINATION`.
-Snapshot destinations must not exist, even as empty files. Inspect the snapshot
-before adoption; retain the source until recovery is verified.
+`info`, `list`, and `search` open existing databases read-only. `delete` also
+requires an existing database. A missing source fails without creating a database
+or its parent directory. Reading a recovery destination must not create an empty
+database that blocks `snapshot DESTINATION`.
+Snapshot destinations must not exist, even as empty files. `snapshot DESTINATION`
+creates missing destination parents only after opening the source database.
+Inspect the snapshot before adoption; retain the source until recovery is verified.
 
 Prefer snapshots when moving a database: records and timestamps survive together.
 For deliberate record-by-record migration, preserve each original creation time:
@@ -55,6 +57,8 @@ For deliberate record-by-record migration, preserve each original creation time:
 utsurigi-memory --hash add "Project decision" --tag project --created-at "2026-10-31T00:00:00Z"
 ```
 
-`add --created-at` accepts RFC3339 and stores UTC Unix seconds. Omit it for the
-current time. Use `--hash` only for hash databases; retain the selected embedding
-model for E5. Do not mix embedding spaces or replace an existing native store.
+`list --json` emits RFC3339 `created_at` timestamps with seconds, accepted by
+`add --created-at`. The stored value is UTC Unix seconds. Omit `--created-at` for
+the current time. Use `--hash` only for hash databases; retain the selected
+embedding model for E5. Do not mix embedding spaces or replace an existing native
+store.
