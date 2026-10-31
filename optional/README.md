@@ -48,6 +48,7 @@ or its parent directory. Reading a recovery destination must not create an empty
 database that blocks `snapshot DESTINATION`.
 Snapshot destinations must not exist, even as empty files. `snapshot DESTINATION`
 creates missing destination parents only after opening the source database.
+Snapshot output files are created with mode 0600.
 Inspect the snapshot before adoption; retain the source until recovery is verified.
 
 Prefer snapshots when moving a database: records and timestamps survive together.
@@ -56,6 +57,9 @@ For deliberate record-by-record migration, preserve each original creation time:
 ```sh
 utsurigi-memory --hash add "Project decision" --tag project --created-at "2026-10-31T00:00:00Z"
 ```
+
+`list` exits quietly on a broken output pipe (EPIPE), in text or JSON mode,
+including when piped to `head`.
 
 `list --json` emits RFC3339 `created_at` timestamps with seconds, accepted by
 `add --created-at`. The stored value is UTC Unix seconds. Omit `--created-at` for

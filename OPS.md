@@ -8,6 +8,9 @@ Run commands with `--config <bot YAML>`; inspect `status` JSON first.
 `ready` means configuration fields are complete, not remote health or successful
 setup. `next_action` is a string: `configure`, `setup`, `sync`, or `wait`.
 `remediation` is an array of strings; timestamps describe local operations.
+`anchor`, `last_success`, and `next_due` in status JSON are RFC3339 strings with
+seconds in UTC (`YYYY-MM-DDTHH:MM:SSZ`), or `null` when unset. Persisted schedule
+state keeps Unix seconds.
 For any nonzero exit, read [RECOVERY.md](RECOVERY.md).
 
 ## Publish and consume

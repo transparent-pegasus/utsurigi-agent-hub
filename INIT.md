@@ -33,9 +33,11 @@ readable by the host.
 ## Dialogue and configuration
 
 Always begin: "Is this a new Bot or a continuation of an existing Bot?" Ask even
-when inferable. For continuation, reuse that Bot's ID and approved decisions for
-the same owner, hub, and purpose. Group related questions into 1–2 exchanges,
-including this opening question.
+when inferable. For continuation, reuse that Bot's ID. Group related questions
+into 1–2 exchanges, including this opening question.
+
+For both new and continuing Bots, reuse approved decisions for the same owner,
+hub, and purpose; do not ask for those decisions again.
 
 Template values are unselected candidates, not consent. Ask about unsettled
 decisions even when YAML is populated. `Config::missing` and `ready` do not check
@@ -51,8 +53,9 @@ ASK agreement; missing/null checks cannot replace this dialogue.
 
 - `secrets.provider`: "Which service, account, and place should hold backup
   credentials and recovery passwords: 1Password, the Bot's Vault, or another
-  store? How will we recover if this host is lost?" Never request secret values
-  in chat; use secure connection facilities.
+  store? How will we recover if this host is lost?" Reuse an existing approved
+  store for the same owner, hub, and purpose. Never request secret values in chat;
+  use secure connection facilities.
 
 - `data.include`: Investigate concrete candidates first. "May we back up A and B,
   keep C as an external reference, and keep regenerable D local? What should we
