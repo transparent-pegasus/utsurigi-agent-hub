@@ -156,9 +156,14 @@ impl Fixture {
         self.cli_env(bot, args, &[])
     }
 
-    pub fn cli_env(&self, bot: &Bot, args: &[&str], env: &[(&str, &str)]) -> Output {
+    pub fn cli_command(&self, bot: &Bot, args: &[&str]) -> Command {
         let mut command = self.command(env!("CARGO_BIN_EXE_utsurigi-agent-hub"));
         command.arg("--config").arg(&bot.file).args(args);
+        command
+    }
+
+    pub fn cli_env(&self, bot: &Bot, args: &[&str], env: &[(&str, &str)]) -> Output {
+        let mut command = self.cli_command(bot, args);
         for (name, value) in env {
             command.env(name, value);
         }

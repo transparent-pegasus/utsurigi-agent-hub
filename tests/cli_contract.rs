@@ -1241,8 +1241,8 @@ fn shared_cache_bots_reuse_one_version_and_observe_the_machine_pointer() {
 }
 
 #[test]
-fn shared_cache_lock_blocks_other_bot_operations_but_status_stays_read_only() {
-    let mut fixture = Fixture::new();
+fn shared_cache_status_stays_read_only_while_a_reader_holds_the_lock() {
+    let fixture = Fixture::new();
     let mut beta = fixture.bot("beta", "beta-1");
     beta.config["paths"]["imports"] = fixture.alpha.config["paths"]["imports"].clone();
     beta.save();
@@ -1258,7 +1258,6 @@ fn shared_cache_lock_blocks_other_bot_operations_but_status_stays_read_only() {
         b"pending",
     );
     fixture.ok(&fixture.alpha, &["registry", "publish"]);
-    let tool = Fixture::wrapper(&mut fixture.alpha);
     let lock = fs::OpenOptions::new()
         .write(true)
         .open(root.join("operation.lock"))
@@ -1267,13 +1266,8 @@ fn shared_cache_lock_blocks_other_bot_operations_but_status_stays_read_only() {
     lock.set_permissions(fs::Permissions::from_mode(0o640))
         .unwrap();
     fs::set_permissions(root, fs::Permissions::from_mode(0o750)).unwrap();
-    for bot in [&fixture.alpha, &beta] {
-        let output = fixture.cli(bot, &["sync"]);
-        failure(&output);
-        assert!(text(&output).contains("Another local operation is running"));
-        assert_eq!(fixture.active_shared(bot), first);
-    }
-    assert_no_writes(&tool);
+    assert_eq!(fixture.active_shared(&fixture.alpha), first);
+    assert_eq!(fixture.active_shared(&beta), first);
     assert_eq!(fs::read(root.join("CURRENT")).unwrap(), pointer);
     // The lock owner may adjust permissions; status must preserve them.
     fs::set_permissions(root, fs::Permissions::from_mode(0o750)).unwrap();
@@ -1325,6 +1319,13 @@ fn shared_cache_hits_still_validate_history_registry_and_current_runtime() {
         "cache hits must revalidate without restoring"
     );
     fixture.ok(&fixture.alpha, &["sync"]);
+    // Losing a referenced directory must remain repairable without changing CURRENT.
+    let pointer = active.parent().unwrap().parent().unwrap().join("CURRENT");
+    let original = fs::read(&pointer).unwrap();
+    fs::remove_dir_all(&active).unwrap();
+    fixture.ok(&fixture.alpha, &["sync"]);
+    assert_eq!(fixture.active_shared(&fixture.alpha), active);
+    assert_eq!(fs::read(pointer).unwrap(), original);
 }
 
 #[test]
@@ -1407,7 +1408,36 @@ fn shared_cache_status_actions_keep_ready_as_configuration_readiness() {
     let legacy_only = status(&fixture.alpha);
     assert_eq!(legacy_only["ready"], true);
     assert_eq!(legacy_only["active_shared"], Value::Null);
-    assert_eq!(legacy_only["next_action"], "setup");
+    assert_eq!(legacy_only["next_action"], "sync");
+    assert!(
+        legacy_only["remediation"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| {
+                let message = item.as_str().unwrap().to_lowercase();
+                message.contains("sync") && message.contains("migrat")
+            })
+    );
+    // Migration is required even when the existing schedule is not due yet.
+    persisted["next_due"] = json!(chrono::Utc::now().timestamp() + 10000);
+    fs::write(&path, persisted.to_string()).unwrap();
+    assert_eq!(status(&fixture.alpha)["next_action"], "sync");
+    fixture.ok(&fixture.alpha, &["sync"]);
+    assert_eq!(status(&fixture.alpha)["next_action"], "wait");
+    persisted["anchor"] = Value::Null;
+    persisted["next_due"] = Value::Null;
+    fs::write(&path, persisted.to_string()).unwrap();
+    assert_eq!(status(&fixture.alpha)["next_action"], "setup");
+    assert_eq!(status(&fixture.alpha)["active_shared"], json!(active));
+    let mut incomplete = Bot {
+        file: fixture.temp.path().join("incomplete.yaml"),
+        config: fixture.alpha.config.clone(),
+    };
+    incomplete.config["timezone"] = Value::Null;
+    incomplete.save();
+    assert_eq!(status(&incomplete)["ready"], false);
+    assert_eq!(status(&incomplete)["next_action"], "configure");
 }
 
 #[test]
@@ -3023,8 +3053,9 @@ fn final_fix_status_reads_last_atomic_state_while_operation_lock_is_held() {
     success(&output);
     let mut expected = state.clone();
     expected["ready"] = json!(true);
-    expected["next_action"] = json!("setup");
-    expected["remediation"] = json!(["Run setup to initialize shared files and the schedule"]);
+    expected["next_action"] = json!("sync");
+    expected["remediation"] =
+        json!(["Run sync to migrate the initialized schedule to the shared cache"]);
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
         expected

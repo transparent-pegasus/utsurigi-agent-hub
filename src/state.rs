@@ -1,9 +1,10 @@
 use crate::config::no_symlinks;
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 #[derive(Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -42,18 +43,95 @@ pub fn private_file(file: &File) -> Result<()> {
 
 impl Lock {
     pub fn acquire(root: &Path) -> Result<Self> {
-        private_dir(root)?;
+        Self::acquire_with_timeout(root, false, "Bot state exclusive", Duration::ZERO)
+    }
+
+    pub fn cache_shared(root: &Path) -> Result<Self> {
+        Self::acquire_with_timeout(root, true, "shared cache shared", Duration::from_secs(30))
+    }
+
+    pub fn cache_exclusive(root: &Path) -> Result<Self> {
+        Self::acquire_with_timeout(
+            root,
+            false,
+            "shared cache exclusive",
+            Duration::from_secs(30),
+        )
+    }
+
+    fn acquire_with_timeout(
+        root: &Path,
+        shared: bool,
+        kind: &str,
+        timeout: Duration,
+    ) -> Result<Self> {
         let path = root.join("operation.lock");
-        no_symlinks(&path)?;
+        private_dir(root).map_err(|error| {
+            Error::new(format!(
+                "Cannot prepare {kind} lock at {}: {}",
+                path.display(),
+                error.message
+            ))
+        })?;
+        no_symlinks(&path).map_err(|error| {
+            Error::new(format!(
+                "Cannot open {kind} lock at {}: {}",
+                path.display(),
+                error.message
+            ))
+        })?;
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
+            .read(true)
             .write(true)
-            .open(path)?;
-        private_file(&file)?;
-        file.try_lock()
-            .map_err(|_| Error::new("Another local operation is running"))?;
-        Ok(Self { _file: file })
+            .open(&path)
+            .map_err(|error| {
+                Error::new(format!(
+                    "Cannot open {kind} lock at {}: {error}",
+                    path.display()
+                ))
+            })?;
+        private_file(&file).map_err(|error| {
+            Error::new(format!(
+                "Cannot protect {kind} lock at {}: {}",
+                path.display(),
+                error.message
+            ))
+        })?;
+        let started = Instant::now();
+        loop {
+            let result = if shared {
+                file.try_lock_shared()
+            } else {
+                file.try_lock()
+            };
+            match result {
+                Ok(()) => return Ok(Self { _file: file }),
+                Err(TryLockError::WouldBlock) => {
+                    if timeout.is_zero() {
+                        return Err(Error::new(format!(
+                            "{kind} lock at {} is busy; another local operation is running",
+                            path.display()
+                        )));
+                    }
+                    let remaining = timeout.saturating_sub(started.elapsed());
+                    if remaining.is_zero() {
+                        return Err(Error::new(format!(
+                            "Timed out waiting for {kind} lock at {} after {timeout:?}",
+                            path.display()
+                        )));
+                    }
+                    std::thread::sleep(Duration::from_millis(25).min(remaining));
+                }
+                Err(TryLockError::Error(error)) => {
+                    return Err(Error::new(format!(
+                        "Cannot acquire {kind} lock at {}: {error}",
+                        path.display()
+                    )));
+                }
+            }
+        }
     }
 }
 
@@ -112,4 +190,67 @@ pub fn fresh_destination(destination: &Path, staging: tempfile::TempDir) -> Resu
         let _ = fs::remove_dir_all(destination);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bot_state_contention_names_the_lock_and_path() {
+        let root = tempfile::tempdir().unwrap();
+        let _held = Lock::acquire(root.path()).unwrap_or_else(|error| panic!("{}", error.message));
+        let error = Lock::acquire(root.path())
+            .err()
+            .expect("state must serialize");
+        assert!(error.message.contains("Bot state"), "{}", error.message);
+        assert!(
+            error
+                .message
+                .contains(&root.path().join("operation.lock").display().to_string())
+        );
+    }
+
+    #[test]
+    fn lock_io_failure_is_named_and_not_reported_as_contention() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("operation.lock")).unwrap();
+        let error = Lock::acquire(root.path())
+            .err()
+            .expect("cannot lock a directory");
+        assert!(error.message.contains("Bot state"), "{}", error.message);
+        assert!(
+            error.message.contains("operation.lock"),
+            "{}",
+            error.message
+        );
+        assert!(!error.message.contains("running"), "{}", error.message);
+        assert!(!error.message.contains("Timed out"), "{}", error.message);
+    }
+
+    #[test]
+    fn cache_lock_timeout_is_bounded_and_names_mode_and_path() {
+        for (shared, kind) in [
+            (true, "shared cache shared"),
+            (false, "shared cache exclusive"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let _held =
+                Lock::acquire(root.path()).unwrap_or_else(|error| panic!("{}", error.message));
+            let started = Instant::now();
+            let timeout = Duration::from_millis(40);
+            let error = Lock::acquire_with_timeout(root.path(), shared, kind, timeout)
+                .err()
+                .expect("held exclusive lock must time out");
+            assert!(started.elapsed() >= timeout);
+            assert!(started.elapsed() < Duration::from_secs(1));
+            assert!(error.message.contains("Timed out"), "{}", error.message);
+            assert!(error.message.contains(kind), "{}", error.message);
+            assert!(
+                error
+                    .message
+                    .contains(root.path().join("operation.lock").to_str().unwrap())
+            );
+        }
+    }
 }

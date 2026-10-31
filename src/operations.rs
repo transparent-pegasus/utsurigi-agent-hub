@@ -13,7 +13,6 @@ use std::path::Path;
 use utsurigi_agent_hub::{retention, schedule};
 
 struct Imported {
-    tree: Option<tempfile::TempDir>,
     registry: Registry,
     history: History,
     snapshot: String,
@@ -22,8 +21,7 @@ struct Imported {
 
 impl Imported {
     fn publish(self) -> Result<()> {
-        self.cache.publish(&self.snapshot, self.tree)?;
-        Ok(())
+        self.cache.publish(&self.snapshot)
     }
 }
 
@@ -107,10 +105,15 @@ fn status(config: &Config) -> Result<()> {
                 .map(|field| format!("Set {field} in configuration"))
                 .collect::<Vec<_>>(),
         )
-    } else if state.anchor.is_none() || state.next_due.is_none() || active_shared.is_none() {
+    } else if state.anchor.is_none() || state.next_due.is_none() {
         (
             "setup",
             vec!["Run setup to initialize shared files and the schedule".to_owned()],
+        )
+    } else if active_shared.is_none() {
+        (
+            "sync",
+            vec!["Run sync to migrate the initialized schedule to the shared cache".to_owned()],
         )
     } else if state
         .next_due
@@ -138,30 +141,26 @@ fn import_shared(config: &Config, restic: &Restic<'_>) -> Result<Imported> {
     let snapshot = latest(&snapshots, "shared").ok_or_else(|| {
         Error::new("No complete shared registry exists; setup by its owner is required")
     })?;
-    let version = cache.version(&snapshot.id);
-    no_symlinks(&version)?;
-    let tree = if cache.contains(&snapshot.id) {
-        None
-    } else {
-        let tree = cache.staging()?;
-        restic.restore(&config.repositories.shared, &snapshot.id, tree.path())?;
-        Some(tree)
-    };
-    let path = tree.as_ref().map_or(version.as_path(), |tree| tree.path());
-    selection::validate_import(path)?;
-    let registry = Registry::load(path, config)?;
-    if !snapshot.owned_by(&registry.owner.bot_id, "shared")
-        || !snapshot
-            .tags
-            .contains(&format!("runtime:{}", registry.owner.runtime_id))
-    {
-        return Err(Error::new(
-            "Shared snapshot ownership does not match its registry",
-        ));
-    }
-    let history = History::load(path, &registry)?;
+    let (registry, history) = cache.load(
+        &snapshot.id,
+        |path| restic.restore(&config.repositories.shared, &snapshot.id, path),
+        |path| {
+            selection::validate_import(path)?;
+            let registry = Registry::load(path, config)?;
+            if !snapshot.owned_by(&registry.owner.bot_id, "shared")
+                || !snapshot
+                    .tags
+                    .contains(&format!("runtime:{}", registry.owner.runtime_id))
+            {
+                return Err(Error::new(
+                    "Shared snapshot ownership does not match its registry",
+                ));
+            }
+            let history = History::load(path, &registry)?;
+            Ok((registry, history))
+        },
+    )?;
     Ok(Imported {
-        tree,
         registry,
         history,
         snapshot: snapshot.id.clone(),
