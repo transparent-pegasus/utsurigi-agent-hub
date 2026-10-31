@@ -148,6 +148,41 @@ fn backup_uses_summary_id_and_only_repository_reads_skip_locks() {
         observed[tag].last().unwrap(),
         summary["snapshot_id"].as_str().unwrap()
     );
+    assert_eq!(
+        observed
+            .iter()
+            .filter(|args| operation(args) == "restore")
+            .count(),
+        0,
+        "unchanged sync must reuse the cached shared snapshot"
+    );
+    let snapshots = fixture.snapshots(&fixture.alpha, "bot");
+    assert_eq!(snapshots.len(), 1);
+    assert!(
+        snapshots[0]["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tag| tag.as_str().unwrap().starts_with("completed:"))
+    );
+    let destination = fixture.temp.path().join("restored");
+    fixture.ok(
+        &fixture.alpha,
+        &[
+            "restore",
+            "--repository",
+            "bot",
+            "--snapshot",
+            snapshots[0]["id"].as_str().unwrap(),
+            "--destination",
+            destination.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        fs::read(destination.join("notes/日本語.md")).unwrap(),
+        PAYLOAD
+    );
+    let observed = calls(&directory);
     let mut reads = 0;
     let mut restores = 0;
     for args in &observed {
@@ -170,16 +205,7 @@ fn backup_uses_summary_id_and_only_repository_reads_skip_locks() {
         }
     }
     assert!(reads > 0);
-    assert!(restores > 0);
-    let snapshots = fixture.snapshots(&fixture.alpha, "bot");
-    assert_eq!(snapshots.len(), 1);
-    assert!(
-        snapshots[0]["tags"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|tag| tag.as_str().unwrap().starts_with("completed:"))
-    );
+    assert_eq!(restores, 1, "explicit restore must run once");
 }
 
 #[test]
