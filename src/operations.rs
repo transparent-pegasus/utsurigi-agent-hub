@@ -7,7 +7,7 @@ use crate::selection;
 use crate::shared::{self, SharedCache};
 use crate::state::{Lock, State, fresh_destination, private_dir};
 use crate::{Action, RegistryAction, RepositoryKind, budget};
-use chrono::Utc;
+use chrono::{DateTime, Datelike, SecondsFormat, Utc};
 use std::fs;
 use std::path::Path;
 use utsurigi_agent_hub::{retention, schedule};
@@ -89,6 +89,17 @@ pub fn execute(path: &Path, action: Action) -> Result<()> {
     Ok(())
 }
 
+fn status_time(seconds: Option<i64>) -> Result<Option<String>> {
+    seconds
+        .map(|seconds| {
+            let time = DateTime::from_timestamp(seconds, 0)
+                .filter(|time| (0..=9999).contains(&time.year()))
+                .ok_or_else(|| Error::new("Status timestamp out of range for RFC3339"))?;
+            Ok(time.to_rfc3339_opts(SecondsFormat::Secs, true))
+        })
+        .transpose()
+}
+
 fn status(config: &Config) -> Result<()> {
     let state = if let Some(root) = &config.paths.state {
         State::load(root, &config.hub)?
@@ -127,8 +138,8 @@ fn status(config: &Config) -> Result<()> {
         "{}",
         serde_json::json!({
             "hub": config.hub,
-            "ready": missing.is_empty(), "last_success": state.last_success,
-            "anchor": state.anchor, "next_due": state.next_due, "active_shared": active_shared,
+            "ready": missing.is_empty(), "last_success": status_time(state.last_success)?,
+            "anchor": status_time(state.anchor)?, "next_due": status_time(state.next_due)?, "active_shared": active_shared,
             "next_action": next_action, "remediation": remediation,
         })
     );

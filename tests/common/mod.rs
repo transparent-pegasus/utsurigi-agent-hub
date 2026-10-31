@@ -186,7 +186,14 @@ impl Fixture {
         assert!(status["ready"].is_boolean());
         for field in ["last_success", "anchor", "next_due"] {
             assert!(status.get(field).is_some(), "missing status field {field}");
-            assert!(status[field].is_null() || status[field].as_i64().is_some());
+            assert!(
+                status[field].is_null()
+                    || status[field]
+                        .as_str()
+                        .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok()),
+                "{field} must be RFC3339 or null: {}",
+                status[field]
+            );
         }
         assert!(
             status.get("active_shared").is_some(),

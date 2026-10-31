@@ -1,6 +1,6 @@
 mod common;
 
-use chrono::Timelike;
+use chrono::{DateTime, Timelike};
 use common::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -35,10 +35,16 @@ fn payload_at(destination: &Path) {
     );
 }
 
+fn status_timestamp(value: &Value) -> i64 {
+    DateTime::parse_from_rfc3339(value.as_str().expect("status time must be a string"))
+        .expect("status time must be RFC3339")
+        .timestamp()
+}
+
 fn schedule_fields(status: &Value) -> (i64, i64) {
     (
-        status["anchor"].as_i64().unwrap(),
-        status["next_due"].as_i64().unwrap(),
+        status_timestamp(&status["anchor"]),
+        status_timestamp(&status["next_due"]),
     )
 }
 
@@ -455,7 +461,7 @@ fn setup_persists_local_0300_and_manual_sync_and_restarts_preserve_the_schedule(
     let after_manual = chrono::Utc::now().timestamp();
     let manual = fixture.status(&fixture.alpha);
     assert_eq!(schedule_fields(&manual), (anchor, next_due));
-    let last_success = manual["last_success"].as_i64().unwrap();
+    let last_success = status_timestamp(&manual["last_success"]);
     assert!((before_manual..=after_manual).contains(&last_success));
     let snapshots = fixture.ids(&fixture.alpha, "bot");
     assert!(next_due > chrono::Utc::now().timestamp() + 2);
@@ -3075,6 +3081,9 @@ fn final_fix_status_reads_last_atomic_state_while_operation_lock_is_held() {
     let output = fixture.cli(&fixture.alpha, &["status"]);
     success(&output);
     let mut expected = state.clone();
+    expected["last_success"] = json!("1970-01-01T00:01:40Z");
+    expected["anchor"] = json!("1970-01-01T00:00:01Z");
+    expected["next_due"] = json!("1970-01-02T00:00:01Z");
     expected["ready"] = json!(true);
     expected["next_action"] = json!("sync");
     expected["remediation"] =
@@ -3092,6 +3101,63 @@ fn final_fix_status_reads_last_atomic_state_while_operation_lock_is_held() {
         0o750
     );
     assert_eq!(lock.metadata().unwrap().permissions().mode() & 0o777, 0o640);
+}
+
+#[test]
+fn status_formats_optional_seconds_without_writing_state() {
+    let fixture = Fixture::new();
+    let root = fixture.alpha.path("state");
+    let file = root.join("status.json");
+    for (seconds, expected) in [
+        (None, Value::Null),
+        (Some(-1_i64), json!("1969-12-31T23:59:59Z")),
+        (Some(0), json!("1970-01-01T00:00:00Z")),
+        (Some(-62_167_219_200), json!("0000-01-01T00:00:00Z")),
+        (Some(253_402_300_799), json!("9999-12-31T23:59:59Z")),
+    ] {
+        let state = json!({
+            "hub": "default", "last_success": seconds,
+            "anchor": seconds, "next_due": seconds, "active_shared": null,
+        });
+        let bytes = serde_json::to_vec(&state).unwrap();
+        write(&file, &bytes);
+        let status = fixture.status(&fixture.alpha);
+        for field in ["last_success", "anchor", "next_due"] {
+            assert_eq!(status[field], expected, "{field} for {seconds:?}");
+        }
+        assert_eq!(status["active_shared"], Value::Null);
+        assert_eq!(fs::read(&file).unwrap(), bytes);
+        assert!(!root.join("operation.lock").exists());
+        assert!(!fixture.alpha.path("imports").exists());
+    }
+}
+
+#[test]
+fn status_rejects_unrepresentable_times_without_writing_state() {
+    let fixture = Fixture::new();
+    let root = fixture.alpha.path("state");
+    let file = root.join("status.json");
+    for field in ["last_success", "anchor", "next_due"] {
+        for seconds in [i64::MIN, i64::MAX, -62_167_219_201, 253_402_300_800] {
+            let mut state = json!({
+                "hub": "default", "last_success": 100,
+                "anchor": 1, "next_due": 86401, "active_shared": null,
+            });
+            state[field] = json!(seconds);
+            let bytes = serde_json::to_vec(&state).unwrap();
+            write(&file, &bytes);
+            let output = fixture.cli(&fixture.alpha, &["status"]);
+            failure(&output);
+            assert_eq!(output.status.code(), Some(1), "{field} for {seconds}");
+            assert!(output.stdout.is_empty());
+            let message = String::from_utf8(output.stderr).unwrap();
+            assert!(message.contains("out of range"), "{message}");
+            assert!(message.contains("RFC3339"), "{message}");
+            assert_eq!(fs::read(&file).unwrap(), bytes);
+            assert!(!root.join("operation.lock").exists());
+            assert!(!fixture.alpha.path("imports").exists());
+        }
+    }
 }
 
 #[test]
@@ -3189,7 +3255,8 @@ fn final_fix_first_incomplete_owner_setup_can_retry_without_losing_history() {
             .lines()
             .any(|call| matches!(call, "forget" | "prune" | "unlock"))
     );
-    assert!(fixture.status(&fixture.alpha)["anchor"].is_i64());
+    let (anchor, next_due) = schedule_fields(&fixture.status(&fixture.alpha));
+    assert_eq!(anchor, next_due);
     assert!(
         fixture
             .active_shared(&fixture.alpha)
@@ -3342,9 +3409,8 @@ fn final_fix_control_due_scheduled_sync_advances_without_moving_the_anchor() {
     fs::write(file, persisted.to_string()).unwrap();
     fixture.ok(&fixture.alpha, &["sync", "--scheduled"]);
     let status = fixture.status(&fixture.alpha);
-    assert_eq!(status["anchor"], anchor);
-    assert_eq!(status["next_due"], anchor + 4 * 86400);
-    assert!(status["last_success"].as_i64().unwrap() > anchor);
+    assert_eq!(schedule_fields(&status), (anchor, anchor + 4 * 86400));
+    assert!(status_timestamp(&status["last_success"]) > anchor);
     let snapshots = fixture.ids(&fixture.alpha, "bot");
     assert_eq!(snapshots.len(), 1);
     let skipped = fixture.ok(&fixture.alpha, &["sync", "--scheduled"]);
