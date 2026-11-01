@@ -58,8 +58,9 @@ For deliberate record-by-record migration, preserve each original creation time:
 utsurigi-memory --hash add "Project decision" --tag project --created-at "2026-10-31T00:00:00Z"
 ```
 
-`list` exits quietly on a broken output pipe (EPIPE), in text or JSON mode,
-including when piped to `head`.
+`list`, `search`, and `info` exit quietly on a broken output pipe (EPIPE),
+including when piped to `head`. This also applies to `list --json` and
+`search --json`; other output errors remain failures.
 
 `list --json` emits RFC3339 `created_at` timestamps with seconds, accepted by
 `add --created-at`. The stored value is UTC Unix seconds. Omit `--created-at` for
