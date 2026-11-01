@@ -6,6 +6,7 @@ mod operations;
 mod registry;
 mod restic;
 mod selection;
+mod shared;
 mod state;
 
 use clap::{Parser, Subcommand, ValueEnum};

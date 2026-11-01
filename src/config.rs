@@ -507,6 +507,18 @@ impl Config {
             return Err(Error::new(
                 "R2 repositories require an HTTPS S3 repository URL without credentials",
             ));
+        } else if url
+            .strip_prefix("s3:https://")
+            .and_then(|repository| repository.split_once('/'))
+            .is_some_and(|(host, path)| {
+                host.split('.')
+                    .chain(path.split('/'))
+                    .any(|component| matches!(component, "ACCOUNT" | "BUCKET"))
+            })
+        {
+            return Err(Error::new(
+                "Replace ACCOUNT and BUCKET repository URL placeholders",
+            ));
         }
         Ok(())
     }

@@ -1,8 +1,9 @@
 mod common;
 
-use chrono::Timelike;
+use chrono::{DateTime, Timelike};
 use common::*;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
@@ -34,10 +35,16 @@ fn payload_at(destination: &Path) {
     );
 }
 
+fn status_timestamp(value: &Value) -> i64 {
+    DateTime::parse_from_rfc3339(value.as_str().expect("status time must be a string"))
+        .expect("status time must be RFC3339")
+        .timestamp()
+}
+
 fn schedule_fields(status: &Value) -> (i64, i64) {
     (
-        status["anchor"].as_i64().unwrap(),
-        status["next_due"].as_i64().unwrap(),
+        status_timestamp(&status["anchor"]),
+        status_timestamp(&status["next_due"]),
     )
 }
 
@@ -454,7 +461,7 @@ fn setup_persists_local_0300_and_manual_sync_and_restarts_preserve_the_schedule(
     let after_manual = chrono::Utc::now().timestamp();
     let manual = fixture.status(&fixture.alpha);
     assert_eq!(schedule_fields(&manual), (anchor, next_due));
-    let last_success = manual["last_success"].as_i64().unwrap();
+    let last_success = status_timestamp(&manual["last_success"]);
     assert!((before_manual..=after_manual).contains(&last_success));
     let snapshots = fixture.ids(&fixture.alpha, "bot");
     assert!(next_due > chrono::Utc::now().timestamp() + 2);
@@ -1082,7 +1089,16 @@ fn shared_imports_publish_a_complete_pointer_and_preserve_both_authoring_trees()
     assert!(!beta.path("shared").join("knowledge.md").exists());
     fixture.ok(&beta, &["sync"]);
     let repeated = fixture.active_shared(&beta);
-    assert_ne!(repeated, first);
+    assert_eq!(repeated, first, "unchanged snapshot must reuse its version");
+    assert_eq!(
+        fs::read_to_string(tool.join("calls"))
+            .unwrap()
+            .lines()
+            .filter(|call| *call == "restore")
+            .count(),
+        1,
+        "setup and repeated syncs must restore an unchanged snapshot only once"
+    );
     assert_eq!(
         fs::read(repeated.join("knowledge.md")).unwrap(),
         b"version one"
@@ -1091,7 +1107,6 @@ fn shared_imports_publish_a_complete_pointer_and_preserve_both_authoring_trees()
         fs::read(first.join("knowledge.md")).unwrap(),
         b"version one"
     );
-
     write(
         fixture.alpha.path("shared").join("knowledge.md"),
         b"version two",
@@ -1109,14 +1124,30 @@ fn shared_imports_publish_a_complete_pointer_and_preserve_both_authoring_trees()
         b"version one"
     );
 
+    let versions = second.parent().unwrap();
+    assert_eq!(versions.file_name().unwrap(), "versions");
+    let current = versions.parent().unwrap().join("CURRENT");
+    let pointer = fs::read(&current).unwrap();
+
     write(
         fixture.alpha.path("shared").join("knowledge.md"),
         b"version three",
     );
     fixture.ok(&fixture.alpha, &["registry", "publish"]);
+    let snapshots = fixture.ids(&fixture.alpha, "shared");
+    let third_id = snapshots
+        .iter()
+        .find(|id| {
+            Some(id.as_str()) != first.file_name().and_then(|name| name.to_str())
+                && Some(id.as_str()) != second.file_name().and_then(|name| name.to_str())
+        })
+        .unwrap();
+    // A crash before pointer publication can leave an unreferenced version directory.
+    write(versions.join(third_id).join("partial"), b"unfinished");
     fs::write(tool.join("mode"), "restore-failure").unwrap();
     failure(&fixture.cli(&beta, &["sync"]));
     assert_eq!(fixture.active_shared(&beta), second);
+    assert_eq!(fs::read(&current).unwrap(), pointer);
     assert_eq!(
         fs::read(second.join("knowledge.md")).unwrap(),
         b"version two"
@@ -1134,8 +1165,328 @@ fn shared_imports_publish_a_complete_pointer_and_preserve_both_authoring_trees()
         fs::read(fixture.alpha.path("shared").join("knowledge.md")).unwrap(),
         b"version three"
     );
+    fs::write(tool.join("mode"), "pass").unwrap();
+    // A killed process may leave staging data; it must never become a published version.
+    write(versions.join(".staging-abandoned/partial"), b"unfinished");
+    fixture.ok(&beta, &["sync"]);
+    let third = fixture.active_shared(&beta);
+    assert!(!third.join("partial").exists());
+    assert_eq!(
+        fs::read(third.join("knowledge.md")).unwrap(),
+        b"version three"
+    );
+    assert!(
+        !first.exists(),
+        "only current and previous versions are retained"
+    );
+    assert!(second.is_dir());
+    let retained: std::collections::BTreeSet<_> = fs::read_dir(versions)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(retained, [second, third.clone()].into_iter().collect());
+    let pointer: Value = serde_json::from_slice(&fs::read(current).unwrap()).unwrap();
+    assert_eq!(
+        pointer["current"],
+        third.file_name().unwrap().to_str().unwrap()
+    );
+    assert!(third.file_name().unwrap().len() == 64);
     payload_at(&beta.path("owned"));
     payload_at(&fixture.alpha.path("owned"));
+}
+
+#[test]
+fn shared_cache_bots_reuse_one_version_and_observe_the_machine_pointer() {
+    let mut fixture = Fixture::new();
+    let mut beta = fixture.bot("beta", "beta-1");
+    beta.config["paths"]["imports"] = fixture.alpha.config["paths"]["imports"].clone();
+    beta.save();
+    let alpha_tool = Fixture::wrapper(&mut fixture.alpha);
+    let beta_tool = Fixture::wrapper(&mut beta);
+    fixture.registry(&fixture.alpha, &[&fixture.alpha, &beta]);
+    write(fixture.alpha.path("shared").join("knowledge.md"), b"one");
+    fixture.ok(&fixture.alpha, &["setup"]);
+    let first = fixture.active_shared(&fixture.alpha);
+    fixture.ok(&beta, &["setup"]);
+    fixture.ok(&beta, &["sync"]);
+    assert_eq!(fixture.active_shared(&beta), first);
+    assert!(
+        !fs::read_to_string(beta_tool.join("calls"))
+            .unwrap()
+            .lines()
+            .any(|call| call == "restore")
+    );
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(fixture.alpha.path("state").join("status.json")).unwrap())
+            .unwrap();
+    assert!(
+        persisted.get("active_shared").is_none(),
+        "new Bot state must not own the shared pointer"
+    );
+
+    write(fixture.alpha.path("shared").join("knowledge.md"), b"two");
+    fixture.ok(&fixture.alpha, &["registry", "publish"]);
+    fixture.ok(&beta, &["sync"]);
+    let second = fixture.active_shared(&beta);
+    assert_ne!(second, first);
+    assert_eq!(
+        fixture.active_shared(&fixture.alpha),
+        second,
+        "status must follow another Bot's switch"
+    );
+    assert_eq!(fs::read(second.join("knowledge.md")).unwrap(), b"two");
+    fixture.ok(&fixture.alpha, &["sync"]);
+    assert_eq!(fixture.active_shared(&fixture.alpha), second);
+    assert_eq!(
+        fs::read_to_string(alpha_tool.join("calls"))
+            .unwrap()
+            .lines()
+            .filter(|call| *call == "restore")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn shared_cache_status_stays_read_only_while_a_reader_holds_the_lock() {
+    let fixture = Fixture::new();
+    let mut beta = fixture.bot("beta", "beta-1");
+    beta.config["paths"]["imports"] = fixture.alpha.config["paths"]["imports"].clone();
+    beta.save();
+    fixture.registry(&fixture.alpha, &[&fixture.alpha, &beta]);
+    fixture.ok(&fixture.alpha, &["setup"]);
+    fixture.ok(&beta, &["setup"]);
+    let first = fixture.active_shared(&fixture.alpha);
+    assert_eq!(first.parent().unwrap().file_name().unwrap(), "versions");
+    let root = first.parent().unwrap().parent().unwrap();
+    let pointer = fs::read(root.join("CURRENT")).unwrap();
+    write(
+        fixture.alpha.path("shared").join("knowledge.md"),
+        b"pending",
+    );
+    fixture.ok(&fixture.alpha, &["registry", "publish"]);
+    let lock = fs::OpenOptions::new()
+        .write(true)
+        .open(root.join("operation.lock"))
+        .unwrap();
+    lock.try_lock_shared().unwrap();
+    lock.set_permissions(fs::Permissions::from_mode(0o640))
+        .unwrap();
+    fs::set_permissions(root, fs::Permissions::from_mode(0o750)).unwrap();
+    assert_eq!(fixture.active_shared(&fixture.alpha), first);
+    assert_eq!(fixture.active_shared(&beta), first);
+    assert_eq!(fs::read(root.join("CURRENT")).unwrap(), pointer);
+    // The lock owner may adjust permissions; status must preserve them.
+    fs::set_permissions(root, fs::Permissions::from_mode(0o750)).unwrap();
+    lock.set_permissions(fs::Permissions::from_mode(0o640))
+        .unwrap();
+    fixture.ok(&beta, &["status"]);
+    assert_eq!(
+        fs::metadata(root).unwrap().permissions().mode() & 0o777,
+        0o750
+    );
+    assert_eq!(lock.metadata().unwrap().permissions().mode() & 0o777, 0o640);
+    drop(lock);
+    fixture.ok(&beta, &["sync"]);
+    assert_ne!(fixture.active_shared(&beta), first);
+}
+
+#[test]
+fn shared_cache_hits_still_validate_history_registry_and_current_runtime() {
+    let mut fixture = Fixture::new();
+    let tool = Fixture::wrapper(&mut fixture.alpha);
+    fixture.ok(&fixture.alpha, &["setup"]);
+    let active = fixture.active_shared(&fixture.alpha);
+    let history = active.join("registry-history.json");
+    let original = fs::read(&history).unwrap();
+    fs::write(tool.join("calls"), "").unwrap();
+    fs::write(&history, b"{}").unwrap();
+    failure(&fixture.cli(&fixture.alpha, &["sync"]));
+    assert_no_writes(&tool);
+    fs::write(&history, original).unwrap();
+    fixture.alpha.config["bot"]["runtime_id"] = json!("superseded-runtime");
+    fixture.alpha.save();
+    let output = fixture.cli(&fixture.alpha, &["sync"]);
+    failure(&output);
+    assert!(text(&output).contains("superseded"));
+    assert_no_writes(&tool);
+    fixture.alpha.config["bot"]["runtime_id"] = json!("alpha-1");
+    fixture.alpha.save();
+    let registry = active.join("registry.yaml");
+    let original = fs::read(&registry).unwrap();
+    fs::write(&registry, b"{}").unwrap();
+    failure(&fixture.cli(&fixture.alpha, &["sync"]));
+    fs::write(&registry, original).unwrap();
+    assert_no_writes(&tool);
+    assert!(
+        !fs::read_to_string(tool.join("calls"))
+            .unwrap()
+            .lines()
+            .any(|call| call == "restore"),
+        "cache hits must revalidate without restoring"
+    );
+    fixture.ok(&fixture.alpha, &["sync"]);
+    // Losing a referenced directory must remain repairable without changing CURRENT.
+    let pointer = active.parent().unwrap().parent().unwrap().join("CURRENT");
+    let original = fs::read(&pointer).unwrap();
+    fs::remove_dir_all(&active).unwrap();
+    fixture.ok(&fixture.alpha, &["sync"]);
+    assert_eq!(fixture.active_shared(&fixture.alpha), active);
+    assert_eq!(fs::read(pointer).unwrap(), original);
+}
+
+#[test]
+fn shared_cache_hubs_are_isolated_with_one_machine_import_root() {
+    let fixture = Fixture::new();
+    fixture.ok(&fixture.alpha, &["setup"]);
+    let first = fixture.active_shared(&fixture.alpha);
+    let mut other = fixture.bot("beta", "other-1");
+    other.config["hub"] = json!("other-hub");
+    other.config["paths"]["imports"] = fixture.alpha.config["paths"]["imports"].clone();
+    other.config["repositories"]["shared"]["url"] =
+        json!(fixture.temp.path().join("repositories/other-shared"));
+    other.save();
+    fixture.registry(&other, &[&other]);
+    fixture.ok(&other, &["setup"]);
+    let second = fixture.active_shared(&other);
+    assert_ne!(second.parent().unwrap(), first.parent().unwrap());
+    assert_eq!(fixture.active_shared(&fixture.alpha), first);
+    assert!(second.is_absolute());
+}
+
+#[test]
+fn shared_cache_rejects_symlinked_pointer_and_cached_files_without_touching_targets() {
+    let mut fixture = Fixture::new();
+    let tool = Fixture::wrapper(&mut fixture.alpha);
+    fixture.ok(&fixture.alpha, &["setup"]);
+    let active = fixture.active_shared(&fixture.alpha);
+    assert_eq!(active.parent().unwrap().file_name().unwrap(), "versions");
+    let pointer = active.parent().unwrap().parent().unwrap().join("CURRENT");
+    let original = fs::read(&pointer).unwrap();
+    let outside = fixture.temp.path().join("outside");
+    fs::write(&outside, &original).unwrap();
+    fs::remove_file(&pointer).unwrap();
+    symlink(&outside, &pointer).unwrap();
+    fs::write(tool.join("calls"), "").unwrap();
+    failure(&fixture.cli(&fixture.alpha, &["status"]));
+    failure(&fixture.cli(&fixture.alpha, &["sync"]));
+    assert_no_writes(&tool);
+    assert_eq!(fs::read(&outside).unwrap(), original);
+    fs::remove_file(&pointer).unwrap();
+    fs::write(&pointer, original).unwrap();
+    symlink(&outside, active.join("knowledge.md")).unwrap();
+    failure(&fixture.cli(&fixture.alpha, &["sync"]));
+    assert_no_writes(&tool);
+}
+
+#[test]
+fn shared_cache_status_actions_keep_ready_as_configuration_readiness() {
+    let fixture = Fixture::new();
+    let status = |bot: &Bot| -> Value {
+        serde_json::from_slice(&fixture.ok(bot, &["status"]).stdout).unwrap()
+    };
+    let initial = status(&fixture.alpha);
+    assert_eq!(initial["ready"], true);
+    assert_eq!(initial["next_action"], "setup");
+    assert!(
+        initial["remediation"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+    );
+    assert!(!fixture.alpha.path("state").exists());
+    assert!(!fixture.alpha.path("imports").exists());
+    fixture.ok(&fixture.alpha, &["setup"]);
+    let active = fixture.active_shared(&fixture.alpha);
+    let path = fixture.alpha.path("state").join("status.json");
+    let mut persisted: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    // Legacy Bot state remains readable, but cannot replace the machine pointer.
+    persisted["active_shared"] = json!(fixture.alpha.path("owned"));
+    persisted["next_due"] = json!(chrono::Utc::now().timestamp() + 10000);
+    fs::write(&path, persisted.to_string()).unwrap();
+    let waiting = status(&fixture.alpha);
+    assert_eq!(waiting["ready"], true);
+    assert_eq!(waiting["next_action"], "wait");
+    assert_eq!(waiting["remediation"], json!([]));
+    assert_eq!(waiting["active_shared"], json!(active));
+    persisted["next_due"] = json!(1);
+    fs::write(&path, persisted.to_string()).unwrap();
+    assert_eq!(status(&fixture.alpha)["next_action"], "sync");
+    fs::remove_file(active.parent().unwrap().parent().unwrap().join("CURRENT")).unwrap();
+    let legacy_only = status(&fixture.alpha);
+    assert_eq!(legacy_only["ready"], true);
+    assert_eq!(legacy_only["active_shared"], Value::Null);
+    assert_eq!(legacy_only["next_action"], "sync");
+    assert!(
+        legacy_only["remediation"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| {
+                let message = item.as_str().unwrap().to_lowercase();
+                message.contains("sync") && message.contains("migrat")
+            })
+    );
+    // Migration is required even when the existing schedule is not due yet.
+    persisted["next_due"] = json!(chrono::Utc::now().timestamp() + 10000);
+    fs::write(&path, persisted.to_string()).unwrap();
+    assert_eq!(status(&fixture.alpha)["next_action"], "sync");
+    fixture.ok(&fixture.alpha, &["sync"]);
+    assert_eq!(status(&fixture.alpha)["next_action"], "wait");
+    persisted["anchor"] = Value::Null;
+    persisted["next_due"] = Value::Null;
+    fs::write(&path, persisted.to_string()).unwrap();
+    assert_eq!(status(&fixture.alpha)["next_action"], "setup");
+    assert_eq!(status(&fixture.alpha)["active_shared"], json!(active));
+    let mut incomplete = Bot {
+        file: fixture.temp.path().join("incomplete.yaml"),
+        config: fixture.alpha.config.clone(),
+    };
+    incomplete.config["timezone"] = Value::Null;
+    incomplete.save();
+    assert_eq!(status(&incomplete)["ready"], false);
+    assert_eq!(status(&incomplete)["next_action"], "configure");
+}
+
+#[test]
+fn shared_cache_validation_rejects_exact_r2_placeholder_components() {
+    let mut fixture = Fixture::new();
+    fixture.alpha.config["storage"]["provider"] = json!("r2");
+    fixture.alpha.config["repositories"]["bot"]["url"] =
+        json!("s3:https://real.r2.cloudflarestorage.com/real-bucket/bot");
+    for (url, valid) in [
+        (
+            "s3:https://ACCOUNT.r2.cloudflarestorage.com/real/shared",
+            false,
+        ),
+        (
+            "s3:https://real.r2.cloudflarestorage.com/BUCKET/shared",
+            false,
+        ),
+        ("s3:https://ACCOUNT/BUCKET/shared", false),
+        (
+            "s3:https://real.r2.cloudflarestorage.com/real/ACCOUNT/shared",
+            false,
+        ),
+        (
+            "s3:https://myACCOUNT.r2.cloudflarestorage.com/myBUCKET/shared",
+            true,
+        ),
+        (
+            "s3:https://account.r2.cloudflarestorage.com/bucket/shared",
+            true,
+        ),
+        (
+            "s3:https://real.r2.cloudflarestorage.com/real/policy.ACCOUNT.md",
+            true,
+        ),
+    ] {
+        fixture.alpha.config["repositories"]["shared"]["url"] = json!(url);
+        fixture.alpha.save();
+        let output = fixture.cli(&fixture.alpha, &["validate"]);
+        assert_eq!(output.status.success(), valid, "{url}: {}", text(&output));
+        redacted(&output);
+    }
+    assert!(!fixture.alpha.path("state").exists());
 }
 
 #[test]
@@ -1495,7 +1846,7 @@ case "$operation" in
     cat) exec "$tool/real-restic" --no-cache --repo "$repository" cat config ;;
     snapshots)
         [ -f "$tool/published-registry.yaml" ] || exit 10
-        printf '%s\n' '[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","time":"2026-10-30T00:00:00Z","hostname":"alpha","tags":["utsurigi-agent-hub","hub:default","kind:shared","bot:alpha","runtime:alpha-1","completed:1"]}]'
+        printf '[{"id":"%s","time":"2026-10-30T00:00:00Z","hostname":"alpha","tags":["utsurigi-agent-hub","hub:default","kind:shared","bot:alpha","runtime:alpha-1","completed:1"]}]\n' "$(cat "$tool/snapshot-id")"
         ;;
     restore)
         cp "$tool/published-registry.yaml" "$target/registry.yaml"
@@ -1546,7 +1897,13 @@ fn registry_privacy_stage_registry(fixture: &Fixture, tool: &Path, registry: &Pa
     }
 
     // A valid projection must reach peer access, so bad metadata cannot explain a privacy rejection.
-    fs::write(tool.join("published-registry.yaml"), shared.to_string()).unwrap();
+    let shared = shared.to_string();
+    fs::write(tool.join("published-registry.yaml"), &shared).unwrap();
+    fs::write(
+        tool.join("snapshot-id"),
+        format!("{:x}", Sha256::digest(shared.as_bytes())),
+    )
+    .unwrap();
     let destination = fixture.temp.path().join("privacy-fixture-positive-control");
     let output = fixture.cli(
         &fixture.alpha,
@@ -1572,6 +1929,12 @@ fn registry_privacy_stage_registry(fixture: &Fixture, tool: &Path, registry: &Pa
     );
     assert_no_writes(tool);
     assert!(!destination.exists());
+    // Changed registry bytes represent a different immutable snapshot, even after a failed pull.
+    fs::write(
+        tool.join("snapshot-id"),
+        format!("{:x}", Sha256::digest(&published)),
+    )
+    .unwrap();
     fs::write(tool.join("published-registry.yaml"), published).unwrap();
     for name in ["calls", "peer-reads", "identity-reads"] {
         fs::write(tool.join(name), "").unwrap();
@@ -1697,6 +2060,16 @@ fn registry_privacy_reuse_is_refused(command: &str) {
             text(&output)
         );
         let calls = fs::read_to_string(tool.join("calls")).unwrap();
+        if command == "pull" {
+            assert_eq!(
+                calls
+                    .lines()
+                    .filter(|operation| *operation == "restore")
+                    .count(),
+                1,
+                "{command}/{case} must restore the changed registry before credential rejection"
+            );
+        }
         let peer_reads = fs::read_to_string(tool.join("peer-reads")).unwrap();
         let wrote = calls.lines().any(|operation| {
             matches!(
@@ -2708,7 +3081,13 @@ fn final_fix_status_reads_last_atomic_state_while_operation_lock_is_held() {
     let output = fixture.cli(&fixture.alpha, &["status"]);
     success(&output);
     let mut expected = state.clone();
+    expected["last_success"] = json!("1970-01-01T00:01:40Z");
+    expected["anchor"] = json!("1970-01-01T00:00:01Z");
+    expected["next_due"] = json!("1970-01-02T00:00:01Z");
     expected["ready"] = json!(true);
+    expected["next_action"] = json!("sync");
+    expected["remediation"] =
+        json!(["Run sync to migrate the initialized schedule to the shared cache"]);
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
         expected
@@ -2722,6 +3101,63 @@ fn final_fix_status_reads_last_atomic_state_while_operation_lock_is_held() {
         0o750
     );
     assert_eq!(lock.metadata().unwrap().permissions().mode() & 0o777, 0o640);
+}
+
+#[test]
+fn status_formats_optional_seconds_without_writing_state() {
+    let fixture = Fixture::new();
+    let root = fixture.alpha.path("state");
+    let file = root.join("status.json");
+    for (seconds, expected) in [
+        (None, Value::Null),
+        (Some(-1_i64), json!("1969-12-31T23:59:59Z")),
+        (Some(0), json!("1970-01-01T00:00:00Z")),
+        (Some(-62_167_219_200), json!("0000-01-01T00:00:00Z")),
+        (Some(253_402_300_799), json!("9999-12-31T23:59:59Z")),
+    ] {
+        let state = json!({
+            "hub": "default", "last_success": seconds,
+            "anchor": seconds, "next_due": seconds, "active_shared": null,
+        });
+        let bytes = serde_json::to_vec(&state).unwrap();
+        write(&file, &bytes);
+        let status = fixture.status(&fixture.alpha);
+        for field in ["last_success", "anchor", "next_due"] {
+            assert_eq!(status[field], expected, "{field} for {seconds:?}");
+        }
+        assert_eq!(status["active_shared"], Value::Null);
+        assert_eq!(fs::read(&file).unwrap(), bytes);
+        assert!(!root.join("operation.lock").exists());
+        assert!(!fixture.alpha.path("imports").exists());
+    }
+}
+
+#[test]
+fn status_rejects_unrepresentable_times_without_writing_state() {
+    let fixture = Fixture::new();
+    let root = fixture.alpha.path("state");
+    let file = root.join("status.json");
+    for field in ["last_success", "anchor", "next_due"] {
+        for seconds in [i64::MIN, i64::MAX, -62_167_219_201, 253_402_300_800] {
+            let mut state = json!({
+                "hub": "default", "last_success": 100,
+                "anchor": 1, "next_due": 86401, "active_shared": null,
+            });
+            state[field] = json!(seconds);
+            let bytes = serde_json::to_vec(&state).unwrap();
+            write(&file, &bytes);
+            let output = fixture.cli(&fixture.alpha, &["status"]);
+            failure(&output);
+            assert_eq!(output.status.code(), Some(1), "{field} for {seconds}");
+            assert!(output.stdout.is_empty());
+            let message = String::from_utf8(output.stderr).unwrap();
+            assert!(message.contains("out of range"), "{message}");
+            assert!(message.contains("RFC3339"), "{message}");
+            assert_eq!(fs::read(&file).unwrap(), bytes);
+            assert!(!root.join("operation.lock").exists());
+            assert!(!fixture.alpha.path("imports").exists());
+        }
+    }
 }
 
 #[test]
@@ -2819,7 +3255,8 @@ fn final_fix_first_incomplete_owner_setup_can_retry_without_losing_history() {
             .lines()
             .any(|call| matches!(call, "forget" | "prune" | "unlock"))
     );
-    assert!(fixture.status(&fixture.alpha)["anchor"].is_i64());
+    let (anchor, next_due) = schedule_fields(&fixture.status(&fixture.alpha));
+    assert_eq!(anchor, next_due);
     assert!(
         fixture
             .active_shared(&fixture.alpha)
@@ -2972,9 +3409,8 @@ fn final_fix_control_due_scheduled_sync_advances_without_moving_the_anchor() {
     fs::write(file, persisted.to_string()).unwrap();
     fixture.ok(&fixture.alpha, &["sync", "--scheduled"]);
     let status = fixture.status(&fixture.alpha);
-    assert_eq!(status["anchor"], anchor);
-    assert_eq!(status["next_due"], anchor + 4 * 86400);
-    assert!(status["last_success"].as_i64().unwrap() > anchor);
+    assert_eq!(schedule_fields(&status), (anchor, anchor + 4 * 86400));
+    assert!(status_timestamp(&status["last_success"]) > anchor);
     let snapshots = fixture.ids(&fixture.alpha, "bot");
     assert_eq!(snapshots.len(), 1);
     let skipped = fixture.ok(&fixture.alpha, &["sync", "--scheduled"]);

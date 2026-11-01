@@ -156,9 +156,14 @@ impl Fixture {
         self.cli_env(bot, args, &[])
     }
 
-    pub fn cli_env(&self, bot: &Bot, args: &[&str], env: &[(&str, &str)]) -> Output {
+    pub fn cli_command(&self, bot: &Bot, args: &[&str]) -> Command {
         let mut command = self.command(env!("CARGO_BIN_EXE_utsurigi-agent-hub"));
         command.arg("--config").arg(&bot.file).args(args);
+        command
+    }
+
+    pub fn cli_env(&self, bot: &Bot, args: &[&str], env: &[(&str, &str)]) -> Output {
+        let mut command = self.cli_command(bot, args);
         for (name, value) in env {
             command.env(name, value);
         }
@@ -181,7 +186,14 @@ impl Fixture {
         assert!(status["ready"].is_boolean());
         for field in ["last_success", "anchor", "next_due"] {
             assert!(status.get(field).is_some(), "missing status field {field}");
-            assert!(status[field].is_null() || status[field].as_i64().is_some());
+            assert!(
+                status[field].is_null()
+                    || status[field]
+                        .as_str()
+                        .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok()),
+                "{field} must be RFC3339 or null: {}",
+                status[field]
+            );
         }
         assert!(
             status.get("active_shared").is_some(),

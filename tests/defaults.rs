@@ -82,6 +82,38 @@ fn public_template_validates_without_runtime_secrets_and_runtime_validation_fail
 }
 
 #[test]
+fn template_status_names_configuration_as_next_action_without_creating_state() {
+    let temp = TempDir::new();
+    let config = temp.path().join("config.yaml");
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("config.yaml"),
+        &config,
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_utsurigi-agent-hub"))
+        .env_clear()
+        .arg("--config")
+        .arg(&config)
+        .arg("status")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(status["ready"], false);
+    assert_eq!(status["next_action"], "configure");
+    assert!(
+        status["remediation"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty() && items.iter().all(Value::is_string))
+    );
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+}
+
+#[test]
 fn private_configs_validate_with_or_without_machine_metadata_without_creating_its_root() {
     for machine in [
         None,

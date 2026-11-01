@@ -1,10 +1,10 @@
 # Current practices
 
-Review periodically and on capability changes, using `review.reviewer_bot` when
-configured. Preserve data externalization. Review everything else, including shared
-knowledge management within each hub, principles, practices, settings,
-implementation choices, and enabled or disabled optional features. Propose
-additions, changes, or removals for user approval.
+Read for feature/policy decisions or reviews. Review periodically and on capability
+changes; use `review.reviewer_bot` when configured. Preserve data externalization.
+Review everything else: shared knowledge within each hub, principles, practices,
+settings, implementation choices, and enabled or disabled optional features.
+Propose additions, changes, or removals for user approval.
 
 - Prefer native Bot features. Optionally adopt alternatives that provide missing
   capabilities or improve native ones while preserving compatibility.
