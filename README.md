@@ -1,6 +1,6 @@
 # utsurigi-agent-hub
 
-Externalize your Bot's data and easily switch to another Bot.
+Use cloud storage for Bot data. Switch Bots easily.
 
 Give your Bot the [Bot instructions](BOT.md) to get started.
 Setup, operations, and recovery guides load only when needed:
@@ -11,15 +11,8 @@ Setup, operations, and recovery guides load only when needed:
 Copy this prompt into the Bot you want to set up:
 
 ```text
-Set up this Bot with https://github.com/transparent-pegasus/utsurigi-agent-hub .
-Read BOT.md, then follow INIT.md and its linked policies. Preserve this Bot's
-existing instructions, data, and approved decisions. Begin by asking whether
-to initialize or update this Bot using an existing Bot's individual data in the
-Hub (continuation), or to proceed without that data (new Bot).
-Investigate the available secret-injection and transfer methods, confirm the
-unsettled choices with me, and prove both methods work before externalizing data.
-Never put secret values in the conversation. Verify restic check and a restore
-that matches the backed-up files byte for byte before declaring setup complete.
+Clone https://github.com/transparent-pegasus/utsurigi-agent-hub .
+Read BOT.md first, then INIT.md; follow their references to other Markdown guides.
 ```
 
 ## Features
