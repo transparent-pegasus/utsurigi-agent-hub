@@ -71,6 +71,13 @@ Host exports live databases consistently and keeps exports quiescent during sync
 Declare SQLite exports in `data.sqlite_snapshots`; live files and WAL/SHM are not
 backups. Secrets, Git internals, model weights, generated indexes, and logs remain
 excluded. Keep local originals until successful synchronization is verified.
+Use the [setup acceptance criteria](INIT.md#acceptance-criteria) for the first
+backup and [recovery drills](RECOVERY.md): `restic check`, restore, and byte-for-byte
+comparison to the captured source/export. Bot-managed transfer also needs
+verification of a freshly retrieved remote generation. A successful local sync
+does not prove that.
+Keep fallback `.env` files beside private configs, outside data roots; remove
+upload copies as specified in [INIT](INIT.md#attached-env-fallback).
 
 An explicitly included path that is excluded fails before repository writes.
 Recursive exclusions warn with an escaped relative path and its owned/shared

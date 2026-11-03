@@ -61,4 +61,6 @@ case "$mode:$operation" in
         exit 1
         ;;
 esac
+# Record TLS filename delivery without opening certificate files in local storage tests.
+if [ "$mode" = tls-boundary ]; then unset RESTIC_CACERT RESTIC_TLS_CLIENT_CERT; fi
 exec "$fixture_dir/real-restic" "$@"

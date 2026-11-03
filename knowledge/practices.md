@@ -8,6 +8,9 @@ Propose additions, changes, or removals for user approval.
 
 - Prefer native Bot features. Optionally adopt alternatives that provide missing
   capabilities or improve native ones while preserving compatibility.
+  During setup, set an optional feature's default to `false` when the Bot already
+  covers it and it adds no missing capability. Preserve explicit user
+  choices, including `true`, and never turn off native systems with this rule.
 - Prefer native Bot scheduling for periodic tasks, including reviews and sync.
   Set review timing there. Reuse its server cron wake mechanism when the local host sleeps.
 - Use Rust unless specified otherwise.

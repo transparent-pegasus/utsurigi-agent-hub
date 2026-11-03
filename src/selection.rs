@@ -279,7 +279,7 @@ fn copy_tree(
 }
 
 #[cfg(unix)]
-fn open_source(root: &Path, relative: &Path) -> Result<File> {
+pub(crate) fn open_source(root: &Path, relative: &Path) -> Result<File> {
     use std::ffi::CString;
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
@@ -316,7 +316,7 @@ fn open_source(root: &Path, relative: &Path) -> Result<File> {
 }
 
 #[cfg(not(unix))]
-fn open_source(_root: &Path, _relative: &Path) -> Result<File> {
+pub(crate) fn open_source(_root: &Path, _relative: &Path) -> Result<File> {
     Err(Error::new(
         "Secure source export requires a supported Unix host",
     ))

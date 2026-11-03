@@ -13,6 +13,14 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 printf '%s\n' "$url" >> "$fixture_dir/requests"
+# Default ACLs can override umask; restrict the log before recording secrets.
+: >> "$fixture_dir/boundary"
+chmod 600 "$fixture_dir/boundary"
+{
+    printf '%s\n' '__CALL__'
+    env
+    printf '%s\n' '__END__'
+} >> "$fixture_dir/boundary"
 release=https://github.com/restic/restic/releases/download/v0.19.1
 case "$url" in
     "$release/SHA256SUMS") kind=checksums ;;

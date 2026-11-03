@@ -215,3 +215,106 @@ fn setup_installs_a_verified_download_and_sync_reuses_it() {
     success(&invoke(&fixture, &curl, "sync"));
     assert_eq!(fs::read_to_string(curl.join("requests")).unwrap(), requests);
 }
+
+#[test]
+fn acquisition_children_receive_dotenv_connections_without_repository_or_aws_credentials() {
+    let (fixture, tool, curl) = acquisition_fixture();
+    fs::write(tool.join("mode"), "tls-boundary").unwrap();
+    let marker = fixture.temp.path().join("must-not-execute");
+    let poison_repository = fixture.temp.path().join("wrong-repository");
+    let mut document = CONNECTION_ENV
+        .iter()
+        .map(|(name, value)| format!("{name}={value}\n"))
+        .collect::<String>();
+    document.push_str(&format!(
+        "AWS_ACCESS_KEY_ID=synthetic-access-key\nAWS_SECRET_ACCESS_KEY={BOT_PASSWORD}\nAWS_SESSION_TOKEN={PEER_PASSWORD}\nRESTIC_PASSWORD=synthetic-ambient-password\nRESTIC_REPOSITORY={}\nRESTIC_PASSWORD_COMMAND=touch {}\nRESTIC_REPOSITORY_FILE=/synthetic/unwanted-repository-file\nRESTIC_UNKNOWN_CONTROL=unwanted\nTEST_HUB_UNRELATED_SECRET=synthetic-unrelated-secret\n",
+        poison_repository.display(), marker.display(),
+    ));
+    document.push_str("RESTIC_CACERT=/synthetic/acquisition-ca.pem\nRESTIC_TLS_CLIENT_CERT=/synthetic/acquisition-client.pem\n");
+    dotenv(&fixture.alpha, document);
+    let output = invoke(&fixture, &curl, "setup");
+    success(&output);
+    let boundary = fs::read_to_string(curl.join("boundary")).unwrap();
+    let calls: Vec<_> = boundary.split("__CALL__\n").skip(1).collect();
+    assert_eq!(
+        calls.len(),
+        2,
+        "both checksum and archive downloads must be checked"
+    );
+    for call in calls {
+        for (name, value) in CONNECTION_ENV {
+            assert_eq!(
+                child_env(call, name),
+                Some(value),
+                "connection variable {name}"
+            );
+        }
+        assert_eq!(child_env(call, "PATH"), curl.to_str());
+        for (name, value) in [("LANG", "C.UTF-8"), ("LC_ALL", "C.UTF-8"), ("TZ", "UTC")] {
+            assert_eq!(child_env(call, name), Some(value));
+        }
+        for name in [
+            "TEST_HUB_SHARED_PASSWORD",
+            "TEST_HUB_ALPHA_PASSWORD",
+            "TEST_HUB_BETA_PASSWORD",
+            "TEST_HUB_UNRELATED_SECRET",
+            "RESTIC_PASSWORD",
+            "RESTIC_PASSWORD_COMMAND",
+            "RESTIC_REPOSITORY",
+            "RESTIC_REPOSITORY_FILE",
+            "RESTIC_UNKNOWN_CONTROL",
+            "RESTIC_CACERT",
+            "RESTIC_TLS_CLIENT_CERT",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+        ] {
+            assert!(
+                child_env(call, name).is_none(),
+                "acquisition inherited {name}"
+            );
+        }
+    }
+    let restic_boundary = fs::read_to_string(tool.join("boundary")).unwrap();
+    let mut versions = 0;
+    for call in restic_boundary.split("__CALL__\n").skip(1) {
+        if call.lines().any(|line| line == "arg:version") {
+            versions += 1;
+            for name in ["RESTIC_CACERT", "RESTIC_TLS_CLIENT_CERT"] {
+                assert!(
+                    child_env(call, name).is_none(),
+                    "version check inherited {name}"
+                );
+            }
+        } else {
+            for (name, value) in [
+                ("RESTIC_CACERT", "/synthetic/acquisition-ca.pem"),
+                (
+                    "RESTIC_TLS_CLIENT_CERT",
+                    "/synthetic/acquisition-client.pem",
+                ),
+            ] {
+                assert_eq!(
+                    child_env(call, name),
+                    Some(value),
+                    "storage connection {name}"
+                );
+            }
+        }
+    }
+    assert!(
+        versions > 0,
+        "downloaded restic compatibility must be checked"
+    );
+    assert!(!marker.exists());
+    assert!(!poison_repository.exists());
+    assert!(tool.join("restic").is_file());
+    assert_eq!(
+        fs::metadata(curl.join("boundary"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}

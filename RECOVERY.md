@@ -21,6 +21,11 @@ stderr line. Never print raw diagnostics that could contain credentials.
 | 11 | Repository locked | Check the holder; wait within the configured bound. Never force-unlock another process. |
 | 12 | Incorrect password or no matching key | Verify the selected repository and authorized password reference; inject securely. |
 
+Neither missing-repository nor password errors prove an empty destination. Check
+the exact account, prefix/path, and mount before any initialization. If data exists
+or its state is unknown, require the original password through the approved
+[secret-delivery method](SECRETS.md); never generate a replacement to bypass an error.
+
 `sync.retry_lock_seconds` bounds lock waiting, not operation replay. A lock or
 password error does not prove an earlier write failed. Authentication,
 configuration, and integrity failures need correction. Consult
@@ -88,6 +93,33 @@ password as `RESTIC_PASSWORD` and storage credentials; R2 also needs
 `--repository shared` or `--repository bot`, plus
 `--snapshot ID --destination NEW_DIRECTORY`. Restore into a fresh directory and
 inspect it before adopting data.
+
+Run `restic --repo SELECTED_REPOSITORY_URL check` with the same binary, secure
+delivery, and R2 option before accepting recovery. Coordinate a shared-repository
+check with its owner while other repository operations are paused; `check` takes
+an exclusive lock. Keep normal locking and never force-unlock another operation.
+Before checking a Bot repository, pause that Bot's scheduled sync, let active
+sync/pull operations finish, and coordinate with peers to keep pulls paused for
+the duration of the check.
+`check --read-data` additionally
+reads the stored payloads; account for its transfer cost. See the
+[pinned restic integrity-check guide](https://github.com/restic/restic/blob/v0.19.1/doc/045_working_with_repos.rst).
+Raw restic does not load the Hub's config-adjacent `.env`; the trusted host launcher
+must map the selected `password_env` to `RESTIC_PASSWORD` without displaying it
+or shell-sourcing the file. It must also supply R2's AWS credentials and the
+route's proxy/CA settings, as described in [SECRETS.md](SECRETS.md).
+
+For setup acceptance or a recovery drill, compare the restored relative file set
+and every source file's bytes against the quiescent source/export captured for that
+snapshot. Allow the CLI-generated `registry-history.json` and require its history
+validation separately; other missing, extra, or different files fail. `restore --verify` alone is
+insufficient. If the original is lost, report that source-byte equality cannot be
+retested; successful integrity verification is not evidence of that comparison.
+For Bot-managed remote transfers, fetch a complete verified encrypted generation
+into a fresh directory and check/restore that copy. Retain the previous generation
+and originals until all applicable [acceptance criteria](INIT.md#acceptance-criteria)
+pass. Delete the temporary plaintext comparison copy after successful acceptance;
+keep the original sources according to their approved retention policy.
 
 Incomplete/uncertain writes never authorize deletion of the prior successful
 version. A completed predecessor expires only after its unique successful

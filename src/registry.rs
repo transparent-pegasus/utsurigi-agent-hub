@@ -1,4 +1,4 @@
-use crate::config::{Config, Repository, env_name, identity, parse_yaml};
+use crate::config::{Config, Repository, identity, parse_yaml, password_env_name};
 use crate::error::{Error, Result};
 use crate::restic::{Restic, password};
 use serde::Deserialize;
@@ -62,7 +62,7 @@ impl Registry {
         for entry in &registry.bots {
             if !identity(&entry.id)
                 || !identity(&entry.runtime_id)
-                || !env_name(&entry.password_env)
+                || !password_env_name(&entry.password_env)
                 || !ids.insert(&entry.id)
                 || !repositories.insert(&entry.repository)
                 || Some(&entry.repository) == config.repositories.shared.url.as_ref()
