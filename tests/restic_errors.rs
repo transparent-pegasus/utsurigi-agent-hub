@@ -89,8 +89,11 @@ fn stderr_redacts_known_secrets_urls_and_unlisted_credentials() {
     let access = "dummy-access-key-27";
     let secret = "dummy-secret-key-28";
     let token = "dummy-session-token-29";
+    let proxy_user = "synthetic-proxy-user-30";
+    let proxy_password = "synthetic-proxy-password-31";
+    let proxy = format!("http://{proxy_user}:{proxy_password}@proxy.example.invalid:8080");
     let diagnostic = format!(
-        "Fatal: synthetic failure {SHARED_PASSWORD} {BOT_PASSWORD} {PEER_PASSWORD} {access} {secret} {token} {} {} op://synthetic/shared/password https://alice:unlisted-password@trace.example.invalid/private?token=unlisted-token password = unlisted-password\nsecond-line-private\n",
+        "Fatal: synthetic failure {SHARED_PASSWORD} {BOT_PASSWORD} {PEER_PASSWORD} {access} {secret} {token} {proxy} {} {} op://synthetic/shared/password https://alice:unlisted-password@trace.example.invalid/private?token=unlisted-token password = unlisted-password\nsecond-line-private\n",
         fixture.alpha.repository("shared"),
         fixture.alpha.repository("bot"),
     );
@@ -102,6 +105,7 @@ fn stderr_redacts_known_secrets_urls_and_unlisted_credentials() {
             ("AWS_ACCESS_KEY_ID", access),
             ("AWS_SECRET_ACCESS_KEY", secret),
             ("AWS_SESSION_TOKEN", token),
+            ("HTTPS_PROXY", &proxy),
         ],
     );
     failure(&output);
@@ -111,6 +115,9 @@ fn stderr_redacts_known_secrets_urls_and_unlisted_credentials() {
         access,
         secret,
         token,
+        proxy_user,
+        proxy_password,
+        "proxy.example.invalid",
         fixture.alpha.repository("shared"),
         fixture.alpha.repository("bot"),
         "op://synthetic/shared/password",
@@ -123,6 +130,66 @@ fn stderr_redacts_known_secrets_urls_and_unlisted_credentials() {
         assert!(
             !message.contains(hidden),
             "diagnostic exposed dummy private data"
+        );
+    }
+}
+
+#[test]
+fn stderr_redacts_dotenv_custom_password_aws_secret_and_proxy_credentials() {
+    let mut fixture = Fixture::new();
+    let password = "synthetic-dotenv-custom-password-41";
+    let aws_secret = "synthetic-dotenv-aws-secret-42";
+    let proxy_user = "synthetic-dotenv-proxy-user-43";
+    let proxy_password = "synthetic-dotenv-proxy-password-44";
+    let proxy = format!("http://{proxy_user}:{proxy_password}@proxy.example.invalid:8080");
+    fixture.alpha.config["repositories"]["bot"]["password_env"] = "DOTENV_REPOSITORY_KEY".into();
+    fixture.alpha.save();
+    dotenv(
+        &fixture.alpha,
+        format!(
+            "TEST_HUB_SHARED_PASSWORD={SHARED_PASSWORD}\nDOTENV_REPOSITORY_KEY={password}\nAWS_SECRET_ACCESS_KEY={aws_secret}\nHTTPS_PROXY={proxy}\n",
+        ),
+    );
+    failing_restic(
+        &mut fixture,
+        42,
+        format!("Fatal: dotenv failure {password} {aws_secret} {proxy}\n").as_bytes(),
+    );
+    let mut command = fixture.cli_command(
+        &fixture.alpha,
+        &[
+            "restore",
+            "--repository",
+            "bot",
+            "--snapshot",
+            &"a".repeat(64),
+            "--destination",
+            fixture.temp.path().join("dotenv-restore").to_str().unwrap(),
+        ],
+    );
+    for name in [
+        "TEST_HUB_SHARED_PASSWORD",
+        "TEST_HUB_ALPHA_PASSWORD",
+        "TEST_HUB_BETA_PASSWORD",
+    ] {
+        command.env_remove(name);
+    }
+    let output = command.output().unwrap();
+    assert_eq!(output.status.code(), Some(42));
+    let message = text(&output);
+    assert!(
+        message.contains("Fatal: dotenv failure"),
+        "restic diagnostic was not emitted"
+    );
+    for (kind, hidden) in [
+        ("repository password", password),
+        ("AWS secret", aws_secret),
+        ("proxy user", proxy_user),
+        ("proxy password", proxy_password),
+    ] {
+        assert!(
+            !message.contains(hidden),
+            "diagnostic exposed a dotenv {kind}"
         );
     }
 }

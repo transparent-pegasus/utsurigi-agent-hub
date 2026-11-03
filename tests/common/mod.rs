@@ -14,6 +14,52 @@ pub const BOT_PASSWORD: &str = "synthetic-ALPHA-secret-9c2d";
 pub const PEER_PASSWORD: &str = "synthetic-BETA-secret-3e4a";
 pub const PAYLOAD: &[u8] = "日本語の記憶 🐎\nunique-private-payload-9f3b\0tail".as_bytes();
 
+pub const CONNECTION_ENV: [(&str, &str); 11] = [
+    (
+        "HTTP_PROXY",
+        "http://upper-http:synthetic-proxy-one@proxy.example.invalid:8080",
+    ),
+    (
+        "HTTPS_PROXY",
+        "http://upper-https:synthetic-proxy-two@proxy.example.invalid:8081",
+    ),
+    (
+        "ALL_PROXY",
+        "socks5://upper-all:synthetic-proxy-three@proxy.example.invalid:1080",
+    ),
+    ("NO_PROXY", "localhost,127.0.0.1,.example.invalid"),
+    (
+        "http_proxy",
+        "http://lower-http:synthetic-proxy-four@proxy.example.invalid:8082",
+    ),
+    (
+        "https_proxy",
+        "http://lower-https:synthetic-proxy-five@proxy.example.invalid:8083",
+    ),
+    (
+        "all_proxy",
+        "socks5://lower-all:synthetic-proxy-six@proxy.example.invalid:1081",
+    ),
+    ("no_proxy", "localhost,127.0.0.1,.lower.example.invalid"),
+    ("SSL_CERT_FILE", "/synthetic/ca-file.pem"),
+    ("SSL_CERT_DIR", "/synthetic/ca-directory"),
+    ("CURL_CA_BUNDLE", "/synthetic/curl-ca.pem"),
+];
+
+pub fn child_env<'a>(call: &'a str, name: &str) -> Option<&'a str> {
+    call.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        (key == name).then_some(value)
+    })
+}
+
+pub fn dotenv(bot: &Bot, bytes: impl AsRef<[u8]>) -> PathBuf {
+    let path = bot.file.parent().unwrap().join(".env");
+    fs::write(&path, bytes).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    path
+}
+
 pub struct Bot {
     pub file: PathBuf,
     pub config: Value,

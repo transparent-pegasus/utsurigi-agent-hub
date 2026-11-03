@@ -15,7 +15,8 @@ storage:
   provider: r2 # CLI: r2 or local.
   class: standard # Operator policy; no extra S3 header.
   # Host provisions the bucket and injects object-scoped AWS credentials securely.
-  # Keep credentials in 1Password/another secrets SaaS or the Bot's Vault service.
+  # Prefer secrets SaaS connectors, then the Bot service's Vault; see SECRETS.md.
+  # Final fallback: private 0600 .env beside this config (process env wins).
   credentials_ref: null
   bot_transfer: null # Host policy: remote destinations and transfer/recovery policy.
 secrets:
@@ -71,6 +72,8 @@ budget:
   # Host verifies billing/quota and encryption overhead before issuing permission.
   attestation_file: null
 # The remaining sections are AI policies; the CLI does not install or run them.
+# INIT sets duplicate optional defaults false if they add no missing capability.
+# Explicit user choices, including true, take precedence over these defaults.
 tasks:
   enabled: true
 memory:

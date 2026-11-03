@@ -56,13 +56,6 @@ fn progress(status: &Value) -> Value {
     })
 }
 
-fn child_env<'a>(call: &'a str, name: &str) -> Option<&'a str> {
-    call.lines().find_map(|line| {
-        let (key, value) = line.split_once('=')?;
-        (key == name).then_some(value)
-    })
-}
-
 fn option<'a>(args: &[&'a str], name: &str) -> Option<&'a str> {
     args.windows(2)
         .find_map(|pair| (pair[0] == name).then_some(pair[1]))
@@ -81,6 +74,7 @@ fn encrypted_round_trip_preserves_unicode_and_setup_is_repeatable() {
     let snapshots = fixture.ids(&fixture.alpha, "bot");
     assert_eq!(snapshots.len(), 1);
     for repository in ["bot", "shared"] {
+        success(&fixture.restic(&fixture.alpha, repository, &["check"]));
         for snapshot in fixture.snapshots(&fixture.alpha, repository) {
             assert_eq!(snapshot["hostname"], "alpha");
             assert!(
@@ -1316,6 +1310,31 @@ fn shared_cache_hits_still_validate_history_registry_and_current_runtime() {
     let original = fs::read(&registry).unwrap();
     fs::write(&registry, b"{}").unwrap();
     failure(&fixture.cli(&fixture.alpha, &["sync"]));
+    let mut reserved_registry: Value = serde_json::from_slice(&original).unwrap();
+    let mut peer = fixture.bot("beta", "beta-1").entry();
+    let mut invalid_password_names = Vec::new();
+    for name in [
+        "HTTP_PROXY",
+        "RESTIC_CACERT",
+        "RESTIC_TLS_CLIENT_CERT",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+    ] {
+        peer["password_env"] = json!(name);
+        reserved_registry["bots"] = json!([fixture.alpha.entry(), peer]);
+        fs::write(&registry, serde_json::to_vec(&reserved_registry).unwrap()).unwrap();
+        let output = fixture.cli(&fixture.alpha, &["sync"]);
+        failure(&output);
+        if !text(&output).contains("Invalid or duplicate registry identity/repository") {
+            invalid_password_names.push(name);
+        }
+        assert_no_writes(&tool);
+    }
+    assert!(
+        invalid_password_names.is_empty(),
+        "active registry must reject reserved password names {invalid_password_names:?}"
+    );
     fs::write(&registry, original).unwrap();
     assert_no_writes(&tool);
     assert!(
@@ -1493,10 +1512,15 @@ fn shared_cache_validation_rejects_exact_r2_placeholder_components() {
 fn restic_children_receive_only_the_selected_password_and_safe_environment() {
     let mut fixture = Fixture::new();
     let tool = Fixture::wrapper(&mut fixture.alpha);
+    fs::write(tool.join("mode"), "tls-boundary").unwrap();
+    dotenv(
+        &fixture.alpha,
+        "TEST_HUB_ENV_FILE_SECRET=synthetic-dotenv-child-secret\nRESTIC_CACERT=/synthetic/file-restic-ca.pem\nRESTIC_TLS_CLIENT_CERT=/synthetic/file-restic-client.pem\n",
+    );
     let marker = fixture.temp.path().join("must-not-execute");
     let password_command = format!("touch {}", marker.display());
     let poison_repo = fixture.temp.path().join("wrong-repository");
-    let overrides = [
+    let mut overrides = vec![
         ("TEST_HUB_UNRELATED_SECRET", PEER_PASSWORD),
         ("RESTIC_PASSWORD", "synthetic-wrong-inherited-password"),
         ("RESTIC_PASSWORD_COMMAND", password_command.as_str()),
@@ -1504,12 +1528,42 @@ fn restic_children_receive_only_the_selected_password_and_safe_environment() {
         ("AWS_ACCESS_KEY_ID", "synthetic-unneeded-local-access-key"),
         ("AWS_SECRET_ACCESS_KEY", PEER_PASSWORD),
         ("AWS_SESSION_TOKEN", SHARED_PASSWORD),
+        (
+            "RESTIC_REPOSITORY_FILE",
+            "/synthetic/unwanted-repository-file",
+        ),
+        ("RESTIC_REST_PASSWORD", "synthetic-unrelated-rest-password"),
+        ("RESTIC_CACERT", "/synthetic/process-restic-ca.pem"),
+        ("RESTIC_UNKNOWN_CONTROL", "synthetic-unwanted-control"),
+        ("LANG", "unwanted-locale"),
+        ("LC_ALL", "unwanted-locale"),
+        ("TZ", "Asia/Tokyo"),
+        ("SYSTEMROOT", "/synthetic/system-root"),
+        ("WINDIR", "/synthetic/windows"),
     ];
+    overrides.extend(CONNECTION_ENV);
     success(&fixture.cli_env(&fixture.alpha, &["setup"], &overrides));
     success(&fixture.cli_env(&fixture.alpha, &["sync"], &overrides));
     let boundary = fs::read_to_string(tool.join("boundary")).unwrap();
     let mut backups = 0;
     for call in boundary.split("__CALL__\n").skip(1) {
+        for (name, value) in CONNECTION_ENV {
+            assert_eq!(
+                child_env(call, name),
+                Some(value),
+                "connection variable {name}"
+            );
+        }
+        for (name, value) in [
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+            ("TZ", "UTC"),
+            ("SYSTEMROOT", "/synthetic/system-root"),
+            ("WINDIR", "/synthetic/windows"),
+        ] {
+            assert_eq!(child_env(call, name), Some(value));
+        }
+        assert!(child_env(call, "PATH").is_some_and(|value| !value.is_empty()));
         let args: Vec<_> = call
             .lines()
             .filter_map(|line| line.strip_prefix("arg:"))
@@ -1518,7 +1572,26 @@ fn restic_children_receive_only_the_selected_password_and_safe_environment() {
             .iter()
             .any(|arg| ["version", "--version", "-V"].contains(arg))
         {
+            for name in ["RESTIC_CACERT", "RESTIC_TLS_CLIENT_CERT"] {
+                assert!(
+                    child_env(call, name).is_none(),
+                    "version check inherited {name}"
+                );
+            }
             continue;
+        }
+        for (name, value) in [
+            ("RESTIC_CACERT", "/synthetic/process-restic-ca.pem"),
+            (
+                "RESTIC_TLS_CLIENT_CERT",
+                "/synthetic/file-restic-client.pem",
+            ),
+        ] {
+            assert_eq!(
+                child_env(call, name),
+                Some(value),
+                "storage connection {name}"
+            );
         }
         let repository = option(&args, "--repo").expect("restic receives explicit --repo");
         let password = if repository == fixture.alpha.repository("shared") {
@@ -1544,10 +1617,15 @@ fn restic_children_receive_only_the_selected_password_and_safe_environment() {
             "TEST_HUB_ALPHA_PASSWORD",
             "TEST_HUB_BETA_PASSWORD",
             "TEST_HUB_UNRELATED_SECRET",
+            "TEST_HUB_ENV_FILE_SECRET",
             "RESTIC_PASSWORD_COMMAND",
+            "RESTIC_REPOSITORY",
             "AWS_ACCESS_KEY_ID",
             "AWS_SECRET_ACCESS_KEY",
             "AWS_SESSION_TOKEN",
+            "RESTIC_REPOSITORY_FILE",
+            "RESTIC_REST_PASSWORD",
+            "RESTIC_UNKNOWN_CONTROL",
         ] {
             assert!(child_env(call, name).is_none(), "child inherited {name}");
         }
@@ -1573,6 +1651,71 @@ fn restic_children_receive_only_the_selected_password_and_safe_environment() {
             & 0o077,
         0
     );
+}
+
+#[test]
+fn connection_environment_reaches_r2_storage_with_only_scoped_credentials() {
+    let (fixture, _, tool, _) = history_r2_fixture();
+    let mut environment = CONNECTION_ENV.to_vec();
+    environment.extend(HISTORY_R2_ENV);
+    environment.extend([
+        ("AWS_SESSION_TOKEN", PEER_PASSWORD),
+        ("TEST_HUB_UNRELATED_SECRET", "synthetic-unrelated-secret"),
+        ("RESTIC_UNKNOWN_CONTROL", "synthetic-unwanted-control"),
+    ]);
+    success(&fixture.cli_env(&fixture.alpha, &["setup"], &environment));
+    let boundary = fs::read_to_string(tool.join("boundary")).unwrap();
+    let mut repositories = std::collections::BTreeSet::new();
+    for call in boundary.split("__CALL__\n").skip(1) {
+        for (name, value) in CONNECTION_ENV {
+            assert_eq!(
+                child_env(call, name),
+                Some(value),
+                "connection variable {name}"
+            );
+        }
+        let args: Vec<_> = call
+            .lines()
+            .filter_map(|line| line.strip_prefix("arg:"))
+            .collect();
+        let Some(repository) = option(&args, "--repo") else {
+            for name in [
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY",
+                "AWS_SESSION_TOKEN",
+            ] {
+                assert!(
+                    child_env(call, name).is_none(),
+                    "version check inherited {name}"
+                );
+            }
+            continue;
+        };
+        repositories.insert(repository);
+        for (name, value) in HISTORY_R2_ENV
+            .into_iter()
+            .chain([("AWS_SESSION_TOKEN", PEER_PASSWORD)])
+        {
+            assert_eq!(child_env(call, name), Some(value));
+        }
+        let password = if repository == fixture.alpha.repository("shared") {
+            SHARED_PASSWORD
+        } else {
+            assert_eq!(repository, fixture.alpha.repository("bot"));
+            BOT_PASSWORD
+        };
+        assert_eq!(child_env(call, "RESTIC_PASSWORD"), Some(password));
+        for name in [
+            "TEST_HUB_SHARED_PASSWORD",
+            "TEST_HUB_ALPHA_PASSWORD",
+            "TEST_HUB_BETA_PASSWORD",
+            "TEST_HUB_UNRELATED_SECRET",
+            "RESTIC_UNKNOWN_CONTROL",
+        ] {
+            assert!(child_env(call, name).is_none(), "storage inherited {name}");
+        }
+    }
+    assert_eq!(repositories.len(), 2);
 }
 
 #[test]

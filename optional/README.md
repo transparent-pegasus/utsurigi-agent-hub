@@ -2,7 +2,10 @@
 
 Install [utsurigi-memory.zip](utsurigi-memory.zip) only when framework RAG is enabled and the host selects
 utsurigi-memory under the shared [review policy](../knowledge/practices.md). Existing instructions
-still apply. Defaults: tasks, Caveman, and Bot-data sharing on; RAG off.
+still apply. Template defaults: tasks, Caveman, and Bot-data sharing on; RAG off.
+Setup overrides duplicate optional features to `false` when they supply no
+capability missing from the Bot; an explicit user decision of `true` wins.
+Bot-data sharing is a separate choice. See [INIT](../INIT.md#optional-capabilities).
 
 Reuse a compatible shared memory store within the selected hub before installing
 another. Keep shared `UTSURIGI_MEMORY_HOME` and `UTSURIGI_MEMORY_CACHE` outside Bot

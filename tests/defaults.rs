@@ -60,6 +60,12 @@ fn public_defaults_match_the_exact_onboarding_schedule_and_feature_contract() {
 
 #[test]
 fn public_template_validates_without_runtime_secrets_and_runtime_validation_fails() {
+    let temp = TempDir::new();
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("config.yaml"),
+        temp.path().join("config.yaml"),
+    )
+    .unwrap();
     for (args, expected_success) in [
         (vec!["validate", "--template"], true),
         (vec!["validate"], false),
@@ -67,7 +73,7 @@ fn public_template_validates_without_runtime_secrets_and_runtime_validation_fail
         let output = Command::new(env!("CARGO_BIN_EXE_utsurigi-agent-hub"))
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .current_dir(temp.path())
             .args(args)
             .output()
             .unwrap();

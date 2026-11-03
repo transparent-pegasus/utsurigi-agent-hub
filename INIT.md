@@ -13,12 +13,16 @@ knowledge facility; never replace its instructions.
 Use trusted Bots under one owner. The Rust CLI uses restic for encryption,
 snapshots, and recovery. The host handles dialogue, secret delivery, scheduling,
 and shared knowledge. Unattended sync needs scheduling and secure secret injection.
+Before relocating/exporting Bot data or initializing its backup repositories,
+complete [secret and transfer preflight](#secrets-and-transfer-before-externalization).
+The inventory and private configuration steps below prepare that preflight.
 
-The host needs Unix, Rust, direct network access, writable storage, and the system
-trust store. Custom CA roots must use that store; acquisition and storage children
-do not inherit proxy or custom-CA environment settings. Restic acquisition needs
-HTTPS curl. Setup reuses the configured version or downloads and checksum-verifies
-the official release. Runtime validation covers Linux.
+The host needs Unix, Rust, network access, writable storage, and trusted CA roots.
+Acquisition and storage children receive the proxy and CA variables listed in
+[.env.example](.env.example); other ambient settings are filtered. Test the actual
+network path, including any proxy and custom CA. Restic acquisition needs HTTPS
+curl. Setup reuses the configured version or downloads and checksum-verifies the
+official release. Runtime validation covers Linux.
 
 ```sh
 cargo build --locked --release
@@ -32,9 +36,19 @@ readable by the host.
 
 ## Dialogue and configuration
 
-Always begin: "Is this a new Bot or a continuation of an existing Bot?" Ask even
-when inferable. For continuation, reuse that Bot's ID. Group related questions
-into 1–2 exchanges, including this opening question.
+Always begin: "Should we initialize or update this Bot using an existing Bot's
+individual data in the Hub (continuation), or proceed without that data (new Bot)?"
+Ask even when inferable. This data-use decision is the boundary: the age of the
+Bot, a previous framework installation, and existing local files do not decide it.
+For continuation, identify the authorized Hub data and reuse that Bot's ID; restore
+and inspect it before adoption. Reuse its repository and password reference as well;
+relocation is a separate recovery operation. Continuation hands over or updates
+that identity: stop its previous runtime before activating the replacement.
+An independently running clone is a separate operation whose identity and data
+scope must be agreed explicitly. For new Bots, allocate a new ID,
+repository destination, and password reference in the chosen Hub without replacing
+local data or reusing retired identifiers. Generate its password only after the
+empty-destination check below. Group related questions into 1–2 exchanges.
 
 For both new and continuing Bots, reuse approved decisions for the same owner,
 hub, and purpose; do not ask for those decisions again.
@@ -51,11 +65,12 @@ ASK agreement; missing/null checks cannot replace this dialogue.
 - `storage.provider`: "Which backup destination and account should we use: R2
   (account and bucket), an authorized Drive, S3, or another store?"
 
-- `secrets.provider`: "Which service, account, and place should hold backup
-  credentials and recovery passwords: 1Password, the Bot's Vault, or another
-  store? How will we recover if this host is lost?" Reuse an existing approved
-  store for the same owner, hub, and purpose. Never request secret values in chat;
-  use secure connection facilities.
+- `secrets.provider`: Investigate [delivery options](SECRETS.md) first, preferring
+  secrets SaaS connectors, then the Bot service's Vault, then other secure host
+  facilities; an attached `.env` is the last resort. "Which available service,
+  account, and delivery method should hold backup credentials and recovery
+  passwords? How will we recover after host loss?" Reuse approved choices for
+  the same owner, hub, and purpose. Request secure injection, never chat values.
 
 - `data.include`: Investigate concrete candidates first. "May we back up A and B,
   keep C as an external reference, and keep regenerable D local? What should we
@@ -68,12 +83,12 @@ ASK agreement; missing/null checks cannot replace this dialogue.
   hub's common knowledge continue.
 
 - `tasks.enabled`, only for new adoption: "Should this framework also record
-  and track tasks (default: `true`)?" Preserve existing methods and unfinished
-  tasks; reuse approved operation without asking again.
+  and track tasks (default: the value derived below)?" Preserve existing methods
+  and unfinished tasks; reuse approved operation without asking again.
 
 - `skills.caveman.enabled`, only at hub initialization: "Should this hub use
-  Caveman to shorten responses (default: `true`)? Existing instructions take
-  priority; proxy, gateway, and model-routing features are excluded." Record
+  Caveman to shorten responses (default: the value derived below)? Existing
+  instructions take priority; proxy, gateway, and model-routing features are excluded." Record
   the answer in hub knowledge and each Bot's YAML; joining Bots reuse it.
 
 - `storage.bot_transfer`, only for `local` storage or when an external destination
@@ -106,8 +121,23 @@ unresolved choices that change permissions.
 - Record `memory.existing_source` and `memory.retrieval_bot_id`; infer
   `memory.embedding_model` only when framework RAG is adopted.
 
-**YAML-ONLY**: preserve current values or template defaults; do not reset prior
-approved settings. No setup questions or automatic tuning for schema `version`,
+Before presenting optional defaults, compare the Bot's existing capabilities with
+each optional feature. If the Bot already provides it and the optional feature
+has no capability missing from the Bot, replace its template default with
+`false`. If it fills a gap, keep the template candidate and discuss adoption
+under the existing policy. Never disable the native capability. A user decision
+of `true` from this or an earlier dialogue overrides the derived default; preserve
+an approved `false` as well. This rule covers tasks, RAG, and Caveman, not backup
+or Bot-data sharing. Hub-wide decisions already approved are reused by joining Bots.
+For Caveman, distinguish an explicit hub-wide user decision from a template value:
+only the former overrides the Bot-specific default derived from its capabilities.
+Record the value, its source (user decision or capability-derived default), and
+scope (hub-wide or this Bot) in hub knowledge. Approving this Bot's generated YAML
+does not by itself turn a derived default into a hub-wide decision; record an
+explicit confirmation of the hub-wide value as a user decision.
+
+**YAML-ONLY**: preserve approved values or the defaults derived above; do not reset
+prior approved settings. No setup questions or automatic tuning for schema `version`,
 structure keys, `storage.class`, `encryption.version`, `sync.*` (interval, start
 time, retention, retry, transport, timeout, bandwidth, concurrency),
 `budget.max_bots`, `budget.storage_target_gb`, `secrets.confirm_each_access`,
@@ -155,6 +185,8 @@ See [operations](OPS.md) for atomic switching, reader locks, reuse, and retentio
 
 Read [config.yaml](config.yaml), then write each Bot's private YAML outside
 checkouts or under ignored `.utsurigi-agent-hub/<hub>/<bot-id>/config.yaml`.
+Choose a config directory outside owned/shared/import/export roots as well, so
+it can hold the private fallback `.env` if needed; these constraints all apply.
 Pass its path with `--config` to every command, including scheduled runs. Paths
 resolve beside that YAML. Keep `machine.root` outside checkouts and Bot workspaces;
 it may contain several hubs. Keep owned, shared authoring, shared imports, and
@@ -183,21 +215,141 @@ Derive and verify the YAML's GitHub blob URL from the actual repository and revi
 record it in `onboarding.config_blob_url`. Until published, offer the bundled YAML.
 Dialogue-only users need no YAML editing or upload.
 
-Keep repository passwords and cloud credentials in 1Password or another secrets
-SaaS, the Bot's Vault service, or both. Recovery credentials and repository locations
-must survive loss of the execution host. Verify the active account before access.
-Deliver secrets through secure process injection, never model-visible output or
-screens. Without injection, keep sync assisted.
-Never create plaintext bootstrap-token files.
-`secrets.confirm_each_access: false` skips extra framework prompts only; vendor
-access checks and existing authorization still apply.
+## Secrets and transfer before externalization
 
-The host supplies each named `password_env` value to the process. The CLI maps it
-to child `RESTIC_PASSWORD`; R2 also uses `AWS_ACCESS_KEY_ID`,
-`AWS_SECRET_ACCESS_KEY`, and optional `AWS_SESSION_TOKEN`. Keep values out of
-commands, logs, chat, and YAML. Store the hub name, local and remote repository
-locations, and recoverable password references in the same secure store so
-recovery survives loss of local configuration.
+Follow this order. Do not export real Bot data, initialize its repositories, or
+start backup/remote transfer until secret injection and the transfer method have
+both been selected **and successfully exercised**. A connector listing, a saved
+setting, `validate`, or `status.ready` alone is not proof. Research the current
+host's capabilities using [SECRETS.md](SECRETS.md), including unattended execution
+and recovery after host loss. Confirm the unsettled ASK choices and INFER results
+as described below before these tests use the selected account or destination.
+
+1. Select secret delivery and the authorized storage/transfer route. Record account,
+   scope, repository locations, credential references, environment variable names,
+   and recovery procedure, never values. Verify the active account. Prefer SaaS
+   connectors, then the Bot service's Vault, then other secure facilities; use
+   the attached `.env` procedure below only if none can be selected.
+2. Inspect each exact repository destination using storage-level listing or the
+   mounted filesystem. Only after proving that destination empty, generate its
+   restic password inside the chosen secret-sharing service as a **new item** and
+   keep its recoverable reference. Never overwrite an existing password item/ref.
+   An existing shared repository and a new Bot repository are
+   separate decisions. If any data exists, request injection of its **existing**
+   password; never replace it or initialize over it. A missing mount, denied list,
+   network failure, restic exit 10/12, or unknown state does not prove emptiness.
+   Stop for the original credentials or storage recovery. When only `.env` is
+   possible, the owner generates and retains new passwords in an independently
+   recoverable private store and delivers the file; the Bot never prints them.
+3. **Prepare the pinned restic binary:** before any raw restic or CLI restore,
+   provision the exact `encryption.version` (template: `0.19.1`). Reuse a trusted,
+   verified binary, or obtain the matching platform archive from the official
+   release for that version ([0.19.1](https://github.com/restic/restic/releases/tag/v0.19.1))
+   and verify it against that release's SHA-256 checksums before installation.
+   Keep it at a durable absolute path outside probe cleanup and
+   set `encryption.executable` to that path in the real and probe YAML. Confirm
+   `restic version` matches. Alternatively, do the isolated probe below first:
+   its `setup` can acquire and verify restic; retain the verified executable at
+   the durable path before removing probe state. `restore` does not acquire
+   restic. Never use the real Bot's `setup` just to obtain the executable.
+4. **Injection test:** launch through the exact secret-delivery mechanism that
+   manual/scheduled operations will use. Prove credentials reach the CLI and the
+   intended restic child without exposing values. For existing storage, use raw
+   restic `snapshots --json` with secure injection, then CLI `restore` of a known
+   complete snapshot into a fresh private directory. For empty storage, use only
+   the isolated probe described below. Do not use the real Bot's `setup`, `sync`,
+   `registry publish`, or `prune` as an injection test. Check scheduled
+   execution separately before enabling unattended sync. A tool returning a secret
+   into model-visible text does not qualify as injection.
+5. **Transfer test:** use non-sensitive fixture bytes in that isolated probe,
+   exercise upload and fresh download over the selected network/connector route,
+   run `restic check`, restore, and compare every fixture byte. For Bot-mediated
+   transfer, test a complete quiescent encrypted repository, not just a local
+   snapshot or an upload receipt. Observe quota and cost authorization first.
+   Retain failure evidence without secrets and keep externalization held until
+   both tests pass; only then call the methods confirmed. Clean up identified
+   disposable probe resources without touching existing data.
+
+For the probe, prepare a separate private YAML with a temporary Hub/Bot identity,
+two distinct empty repository destinations, isolated owned/shared/import/state
+roots, a small non-sensitive fixture, and its owner registry. Keep the real Bot's
+YAML unchanged. Verify both probe destinations empty, then create disposable
+password items through the selected delivery route. Use the probe YAML for CLI
+`setup`/`sync` and `restore`; these operations may externalize only the fixture.
+R2 access must cover the exact probe prefixes, and its cost attestation must name
+those exact URLs. If that access or budget is unavailable, leave preflight pending.
+For Bot transfer, fetch the completed encrypted probe generation into a fresh
+directory and use a separate recovery YAML for the comparison. Once both tests
+pass, delete only the identified probe prefixes via authorized storage operations
+and remove the disposable credential items and private probe files; restic has
+no delete-repository command. Never broaden access or delete an existing prefix
+to make a probe work.
+
+The host supplies each YAML `password_env` value to the CLI; it maps only the
+selected repository's value to child `RESTIC_PASSWORD`. R2 additionally needs
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally `AWS_SESSION_TOKEN`.
+Provider bootstrap credentials belong to the secure launcher, not YAML or a
+model-visible tool result. Never create extra plaintext bootstrap-token files.
+`secrets.confirm_each_access: false` removes only extra framework prompts; vendor
+access checks remain. Keep passwords, credential references, hub name, repository
+locations, and the host-loss recovery route recoverable outside the execution host.
+
+### Attached .env fallback
+
+Only when higher-priority delivery cannot be used, investigate a private `.env`
+attachment through the host's authorized file-transfer facility. Before requesting
+any real secrets, test a dummy `.env` containing only a public, non-secret marker.
+Verify that the facility delivers the file to the execution environment without
+automatically inserting its contents into model context, conversation records, or
+tool/log output. Not opening the file with a Bot tool is not proof of this.
+If contents are automatically exposed, or delivery behavior cannot be verified,
+this route is unavailable: keep externalization held and choose another facility.
+
+Only after that proof may the owner supply the real file, never pasted chat text.
+This is an explicit exception for one local plaintext credential file; do not copy
+its contents into prompts, tool output, shell history, logs, or YAML. If a real file
+is accidentally exposed, stop and treat its credentials as disclosed. Coordinate
+revocation/rotation with the owner and follow [recovery](RECOVERY.md), retaining
+working recovery credentials until their replacements are verified. A password
+change alone cannot revoke repository keys already disclosed. Deleting the
+attachment does not undo disclosure.
+
+- Delivery can have two stages: first supply only storage/connection credentials
+  needed to inspect the exact destinations. Do not pre-generate repository
+  passwords. After proving emptiness, the owner adds newly generated passwords;
+  for existing or uncertain storage, supply the original passwords instead.
+  The owner provides the completed replacement file, and the host verifies its
+  scope, owner, and 0600 mode before explicitly replacing the private `.env`.
+  Repeat upload-copy cleanup after every replacement; retain the previous private
+  file until the replacement is verified, then remove that superseded local copy.
+- Place it beside the private Bot config, outside source checkouts or under the
+  ignored `.utsurigi-agent-hub/<hub>/<bot-id>/` directory. Keep that directory
+  private (`0700`), outside owned/shared/import/export roots. Use one config
+  directory per credential scope so unrelated Bots do not share one `.env`.
+- The host executor handles the attachment without returning its contents to the
+  model or opening it through a model-visible file reader. Before copying bytes,
+  create a new private destination owned by the executing user with mode **0600**;
+  a direct move is allowed only after verifying the source has that owner/mode.
+  Verify the private destination, then remove remaining upload/staging copies.
+  Never overwrite an existing `.env` silently. If the platform retains attachments,
+  delete the remote attachment using its supported controls too, or ask the owner
+  to delete it when only they can do so. Report unavailable deletion and arrange
+  rotation/revocation instead of claiming every copy is gone. Retain the owner's
+  separate recovery copy.
+- The CLI automatically reads only `.env` next to the canonical `--config` file,
+  before any operation. Missing files are allowed. Existing process variables,
+  including empty ones, take priority. If either spelling of a proxy case pair
+  exists in that original process environment, both `.env` spellings are ignored.
+  Invalid syntax, symlinks, non-regular files, wrong ownership, or a mode other
+  than 0600 stop startup without showing values.
+  Do not shell-source the file. Its literal syntax and complete input-variable
+  list are in [.env.example](.env.example). Provider references such as `op://...`
+  are resolved by their launcher, not by the dotenv loader.
+- The file stays excluded from backups and Git. Test injection and transfer by
+  the same two checks above. Enable unattended execution only if that execution
+  context can securely reach the file and destination after restart.
+
+## Storage and first backup
 
 Provision object-scoped R2 access. With `budget.free_tier_only`, writes require
 a JSON attestation at `budget.attestation_file`, owned by the process user with
@@ -260,8 +412,48 @@ in one concise list and get one confirmation. Include the current
 honor any existing approved RAG state. Add one line: "Details are configurable
 in YAML."
 
-Prepare the allowlisted files, validate the local configuration, invoke `setup`,
-then verify one `sync` and recovery before scheduling.
+After the two preflight tests pass, prepare the allowlisted files. Before backup,
+freeze the source and consistent SQLite exports, record the expected relative file
+set (Bot: `data.include` minus built-in and configured exclusions; shared:
+`paths.shared` minus built-in exclusions, without applying `data.exclude`), and
+retain a private byte-for-byte copy of those files outside all backup roots.
+Record file sizes and hashes as an inventory, but retain the bytes for the
+comparison. Do not diff an unfiltered live root or use a restore to build
+its own expected baseline. Keep the selected sources quiescent, validate the local
+configuration, invoke `setup`, and perform one `sync`; associate the inventory
+with the selected snapshot IDs. Release the source freeze after capture/backup,
+and keep the private expected copy until acceptance passes. Then delete that
+temporary plaintext comparison copy; this cleanup does not delete original sources.
+
+### Acceptance criteria
+
+Before declaring setup complete or enabling scheduling, record all of:
+
+- Secret injection and transfer tests passed for the selected execution context.
+- `restic --repo SELECTED_REPOSITORY_URL check` succeeds for both the shared and
+  Bot repositories, using the configured/acquired binary and authorized secret
+  delivery. Coordinate the shared check with the owner in a maintenance window
+  while other repository operations are paused: `check` takes an exclusive lock.
+  Keep normal locking and never force-unlock to make the check proceed.
+  Include `-o s3.region=auto` for R2. Use `check --read-data` to also verify
+  stored payloads when the approved quota permits; never silently substitute it
+  for the required restore comparison. Raw restic does not load `.env`; use the
+  complete in-memory mapping in [SECRETS.md](SECRETS.md) and the
+  [recovery commands](RECOVERY.md).
+- Restore each selected complete snapshot by explicit ID into a fresh private
+  directory. Compare the full expected relative file set and every file's bytes
+  with the captured backup source/export, using `cmp` or an equivalent binary
+  comparison. Include consistent database exports and the shared authoring files.
+  The additional `registry-history.json` is generated by the CLI during export;
+  require the CLI's history validation for it, not a comparison to a nonexistent
+  authoring file. Any other missing, extra, or changed file fails.
+  `restore --verify` alone does not prove equality to the intended source.
+  Keep timestamps, IDs, exit status, and comparison results; never log file
+  contents or secrets.
+- For Bot-managed transfer, retrieve the published encrypted generation into a
+  fresh local directory and perform these checks on that copy. Local `sync`
+  success does not satisfy remote backup acceptance. Preserve originals and the
+  prior verified remote generation until this succeeds.
 
 ## Optional capabilities
 

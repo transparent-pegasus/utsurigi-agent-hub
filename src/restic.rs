@@ -1,4 +1,4 @@
-use crate::config::{Config, Repository};
+use crate::config::{CHILD_ENV, Config, RESTIC_TLS_ENV, Repository};
 use crate::error::{Error, Result};
 use crate::selection::{Export, validate_import};
 use crate::state::{private_dir, private_file};
@@ -106,7 +106,7 @@ fn safe_environment(command: &mut Command) {
         .env("LANG", "C.UTF-8")
         .env("LC_ALL", "C.UTF-8")
         .env("TZ", "UTC");
-    for name in ["PATH", "SYSTEMROOT", "WINDIR"] {
+    for name in CHILD_ENV {
         if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
         }
@@ -377,6 +377,11 @@ impl<'a> Restic<'a> {
     ) -> Result<Output> {
         let mut command = Command::new(&self.executable);
         safe_environment(&mut command);
+        for name in RESTIC_TLS_ENV {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
         command
             .env("RESTIC_PASSWORD", password(repository)?)
             .env("TMPDIR", &self.temp)

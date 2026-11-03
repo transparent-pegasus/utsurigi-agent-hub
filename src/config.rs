@@ -1,7 +1,33 @@
 use crate::error::{Error, Result};
 use serde::{Deserialize, de::DeserializeOwned};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+
+pub const CHILD_ENV: [&str; 14] = [
+    "PATH",
+    "SYSTEMROOT",
+    "WINDIR",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "CURL_CA_BUNDLE",
+];
+
+pub const RESTIC_TLS_ENV: [&str; 2] = ["RESTIC_CACERT", "RESTIC_TLS_CLIENT_CERT"];
+
+pub const STORAGE_CREDENTIAL_ENV: [&str; 3] = [
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+];
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -271,6 +297,95 @@ pub fn env_name(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == b'_')
 }
 
+pub fn password_env_name(value: &str) -> bool {
+    env_name(value)
+        && !CHILD_ENV.contains(&value)
+        && !RESTIC_TLS_ENV.contains(&value)
+        && !STORAGE_CREDENTIAL_ENV.contains(&value)
+}
+
+pub fn dotenv(canonical_config: &Path) -> Result<BTreeMap<String, String>> {
+    let path = canonical_config.with_file_name(".env");
+    let insecure = || {
+        Error::new(
+            "Config-adjacent .env must be an owner-owned regular file with mode 0600 and no symlinks",
+        )
+    };
+    no_symlinks(&path).map_err(|_| insecure())?;
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(_) => return Err(insecure()),
+    };
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        Err(Error::new(
+            "Private .env permissions require a supported Unix host",
+        ))
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        use std::os::unix::fs::MetadataExt;
+
+        let private = |metadata: &fs::Metadata| {
+            metadata.is_file()
+                && metadata.mode() & 0o7777 == 0o600
+                && metadata.uid() == unsafe { libc::geteuid() }
+        };
+        if !private(&metadata) {
+            return Err(insecure());
+        }
+        let mut file = crate::selection::open_source(
+            canonical_config.parent().ok_or_else(insecure)?,
+            Path::new(".env"),
+        )
+        .map_err(|_| insecure())?;
+        if !private(&file.metadata().map_err(|_| insecure())?) {
+            return Err(insecure());
+        }
+        let invalid = || Error::new("Invalid config-adjacent .env syntax");
+        let mut document = String::new();
+        file.read_to_string(&mut document).map_err(|_| invalid())?;
+        if document.contains('\0') {
+            return Err(invalid());
+        }
+        let mut variables = BTreeMap::new();
+        for line in document.lines() {
+            if line.contains('\r') {
+                return Err(invalid());
+            }
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let line = line
+                .strip_prefix("export")
+                .filter(|rest| rest.starts_with(char::is_whitespace))
+                .map_or(line, str::trim_start);
+            let (name, value) = line.split_once('=').ok_or_else(invalid)?;
+            let name = name.trim();
+            if !env_name(name) {
+                return Err(invalid());
+            }
+            let value = value.trim();
+            let value = if let Some(quote @ ('\'' | '"')) = value.chars().next() {
+                value[1..].strip_suffix(quote).ok_or_else(invalid)?
+            } else {
+                value
+            };
+            if variables
+                .insert(name.to_owned(), value.to_owned())
+                .is_some()
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(variables)
+    }
+}
+
 pub fn relative(value: &Path) -> bool {
     !value.as_os_str().is_empty()
         && value
@@ -406,8 +521,14 @@ impl Config {
             return Err(Error::new("Intervals and resource limits must be positive"));
         }
         for repo in [&self.repositories.shared, &self.repositories.bot] {
-            if repo.password_env.as_ref().is_some_and(|s| !env_name(s)) {
-                return Err(Error::new("Invalid password environment variable name"));
+            if repo
+                .password_env
+                .as_ref()
+                .is_some_and(|s| !password_env_name(s))
+            {
+                return Err(Error::new(
+                    "Invalid password environment variable name: connection, storage credential and system names are reserved",
+                ));
             }
             if let Some(url) = &repo.url {
                 self.validate_url(url)?;
