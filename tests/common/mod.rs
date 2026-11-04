@@ -166,7 +166,22 @@ impl Fixture {
         Self::make_bot(self.temp.path(), id, runtime)
     }
 
-    pub fn registry(&self, owner: &Bot, bots: &[&Bot]) {
+    pub fn registry(&self, author: &Bot, bots: &[&Bot]) {
+        let registry = json!({
+            "version": 2,
+            "hub": author.config["hub"].as_str().unwrap_or("default"),
+            "max_bots": author.config["budget"]["max_bots"].as_u64().unwrap_or(50),
+            "bots": bots.iter().map(|bot| bot.entry()).collect::<Vec<_>>()
+        });
+        fs::write(
+            author.path("shared").join("registry.yaml"),
+            serde_json::to_vec_pretty(&registry).unwrap(),
+        )
+        .unwrap();
+    }
+
+    // Genuine old-schema fixtures must opt in; v1 still requires its owner row.
+    pub fn legacy_registry(&self, owner: &Bot, bots: &[&Bot]) {
         let registry = json!({
             "version": 1,
             "hub": owner.config["hub"].as_str().unwrap_or("default"),
@@ -301,6 +316,57 @@ impl Fixture {
             .collect()
     }
 
+    pub fn content_snapshots(&self, bot: &Bot, repository: &str) -> Vec<Value> {
+        let kind = if repository == "shared" {
+            "kind:shared-v2"
+        } else {
+            "kind:bot"
+        };
+        let snapshots: Vec<_> = self
+            .snapshots(bot, repository)
+            .into_iter()
+            .filter(|snapshot| snapshot["tags"].as_array().unwrap().contains(&json!(kind)))
+            .collect();
+        assert!(
+            !snapshots.is_empty(),
+            "{repository} must contain an ordinary content snapshot"
+        );
+        snapshots
+    }
+
+    pub fn shared_head(&self, bot: &Bot) -> Value {
+        let path = Path::new(bot.repository("shared")).join("uah-head.json");
+        let head: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(head["version"], 2);
+        assert_eq!(head["hub"], bot.config["hub"].as_str().unwrap_or("default"));
+        assert!(head["revision"].as_u64().is_some_and(|value| value > 0));
+        let id = head["snapshot"].as_str().unwrap();
+        assert_eq!(id.len(), 64);
+        assert!(id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        head
+    }
+
+    pub fn current_shared_id(&self, bot: &Bot) -> String {
+        self.shared_head(bot)["snapshot"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    // Copy the actual accepted authoring base, including its revision metadata.
+    // Generated history remains an output of publication, never an author input.
+    pub fn author_current(&self, bot: &Bot) {
+        let source = self.active_shared(bot);
+        assert_eq!(
+            source.file_name().unwrap().to_str().unwrap(),
+            self.current_shared_id(bot),
+            "refresh the import before copying the accepted authoring base"
+        );
+        fs::remove_dir_all(bot.path("shared")).unwrap();
+        copy_tree(&source, &bot.path("shared"));
+        fs::remove_file(bot.path("shared").join("registry-history.json")).unwrap();
+    }
+
     pub fn wrapper(bot: &mut Bot) -> PathBuf {
         let directory = bot.file.parent().unwrap().join("restic-fixture");
         fs::create_dir_all(&directory).unwrap();
@@ -313,6 +379,24 @@ impl Fixture {
         bot.config["encryption"]["executable"] = json!(executable);
         bot.save();
         directory
+    }
+}
+
+pub fn copy_tree(source: &Path, target: &Path) {
+    fs::create_dir_all(target).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let destination = target.join(entry.file_name());
+        let kind = entry.file_type().unwrap();
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &destination);
+        } else {
+            assert!(
+                kind.is_file(),
+                "test authoring sources must contain regular files"
+            );
+            fs::copy(entry.path(), destination).unwrap();
+        }
     }
 }
 

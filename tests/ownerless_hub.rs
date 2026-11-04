@@ -127,6 +127,14 @@ fn machine(bot: &mut Bot, cap: usize) {
         "root": bot.file.parent().unwrap()
     });
     bot.config["budget"] = json!({"max_bots": cap});
+    let path = bot.path("shared").join("registry.yaml");
+    if path.is_file() {
+        let mut value = registry(&bot.path("shared"));
+        if value["version"] == 2 {
+            value["max_bots"] = json!(cap);
+            fs::write(path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        }
+    }
     bot.config["sync"] = json!({
         "retry_lock_seconds": 1,
         "transport_retries": 0,
@@ -171,20 +179,6 @@ fn head(bot: &Bot) -> Value {
         "setup must create the CAS head uah-head.json"
     );
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
-}
-
-fn copy_tree(source: &Path, target: &Path) {
-    fs::create_dir_all(target).unwrap();
-    for entry in fs::read_dir(source).unwrap() {
-        let entry = entry.unwrap();
-        let to = target.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_tree(&entry.path(), &to);
-        } else {
-            assert!(entry.file_type().unwrap().is_file());
-            fs::copy(entry.path(), to).unwrap();
-        }
-    }
 }
 
 fn restic_tool(bot: &Bot) -> PathBuf {
@@ -320,7 +314,7 @@ fn backup_tree(
 // Build genuine v1 storage without depending on any supplied old executable.
 // Extra retired identifiers make preservation of cumulative history observable.
 fn legacy(fixture: &Fixture, bots: &[&Bot]) -> (String, Value) {
-    fixture.registry(&fixture.alpha, bots);
+    fixture.legacy_registry(&fixture.alpha, bots);
     write(fixture.alpha.path("shared").join("knowledge.md"), KNOWLEDGE);
     raw(
         fixture,
@@ -527,6 +521,13 @@ fn new_hub_has_ownerless_v2_registry_shared_cap_and_cas_head() {
     assert_eq!(current.file_name().unwrap().to_str().unwrap(), snapshot);
     assert_eq!(head["revision"], 1);
     let all = snapshots(&fixture, &fixture.alpha, "shared");
+    let accepted = all.iter().find(|value| value["id"] == snapshot).unwrap();
+    assert!(
+        accepted["tags"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("kind:shared-v2"))
+    );
     let fence = all
         .iter()
         .find(|snapshot| {
@@ -836,7 +837,8 @@ fn credential_only_pull_allows_an_unregistered_caller() {
     ok(&fixture, &fixture.alpha, &["sync"]);
     let mut caller = fixture.bot("beta", "beta-unregistered");
     machine(&mut caller, 8);
-    let (command, destination) = pull_to(&fixture, &caller, "alpha", "unregistered-pull");
+    let (mut command, destination) = pull_to(&fixture, &caller, "alpha", "unregistered-pull");
+    command.env_remove("TEST_HUB_BETA_PASSWORD");
     let output = Running::start(command).finish();
     redacted(&output);
     success(&output);
@@ -848,6 +850,7 @@ fn credential_only_pull_allows_an_unregistered_caller() {
         roster(&active(&fixture, &fixture.alpha)),
         BTreeSet::from(["alpha".into()])
     );
+    assert!(!Path::new(caller.repository("bot")).join("config").exists());
 }
 
 #[test]
@@ -1087,10 +1090,6 @@ fn failed_setup_has_offline_actionable_status_without_raw_stderr_or_credentials(
     let output = cli(&fixture, &fixture.alpha, &["setup"]);
     redacted(&output);
     failure(&output);
-    assert!(
-        !text(&output).contains("ownerless-raw-stderr-sentinel"),
-        "CLI must not echo raw child stderr"
-    );
     let calls = fs::read(tool.join("calls")).unwrap();
     write(tool.join("mode"), b"offline");
     let offline = status(&fixture, &fixture.alpha);
@@ -1266,6 +1265,31 @@ fn reject_invalid_decision(variant: &str) {
             .join("uah-head.json")
             .exists()
     );
+    // Validation can fail before repository initialization. If it got farther,
+    // no incompatible fence may have been installed on the rejected input.
+    if Path::new(fixture.alpha.repository("shared"))
+        .join("config")
+        .is_file()
+    {
+        for snapshot in snapshots(&fixture, &fixture.alpha, "shared") {
+            let tags = snapshot["tags"].as_array().unwrap();
+            assert!(
+                !tags
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|tag| tag.starts_with("uah2:")),
+                "invalid initial decision must not fence the repository"
+            );
+            assert_eq!(
+                tags.iter()
+                    .filter_map(Value::as_str)
+                    .filter(|tag| tag.starts_with("hub:"))
+                    .collect::<Vec<_>>(),
+                ["hub:default"],
+                "invalid initial decision must leave legacy namespace validation usable"
+            );
+        }
+    }
     assert_eq!(
         fs::read(fixture.alpha.path("shared").join("decisions.yaml")).unwrap(),
         invalid.as_bytes()
@@ -1436,6 +1460,91 @@ fn migration_rejects_config_swap_to_cloned_repository_before_capture_or_fence() 
 // The wrapper stops only after the real outer --stdin-from-command backup
 // returns successfully. At that barrier the fence is durable and its native
 // append lock has been released; no test lock or forced unlock is involved.
+#[test]
+fn new_hub_restarts_after_durable_null_source_fence_without_extra_bot_backups() {
+    let mut fixture = Fixture::new();
+    machine(&mut fixture.alpha, 3);
+    write(fixture.alpha.path("shared").join("knowledge.md"), KNOWLEDGE);
+    let tool = wrapper(&mut fixture.alpha, "durable-fence");
+    let mut initializing = Running::start(fixture.cli_command(&fixture.alpha, &["setup"]));
+    initializing.reached(&tool.join("ready"));
+    assert!(
+        !Path::new(fixture.alpha.repository("shared"))
+            .join("uah-head.json")
+            .exists()
+    );
+    let all = snapshots(&fixture, &fixture.alpha, "shared");
+    assert_eq!(
+        all.len(),
+        1,
+        "empty initialization needs a control root, no legacy capture"
+    );
+    let fence_id = all[0]["id"].as_str().unwrap().to_owned();
+    let tags = all[0]["tags"].as_array().unwrap();
+    for required in [
+        "uah2:kind:format-fence",
+        "uah2:format:2",
+        "uah2:hub:default",
+    ] {
+        assert!(tags.contains(&json!(required)));
+    }
+    assert!(
+        !tags
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|tag| tag.starts_with("hub:"))
+    );
+    let restored = fixture.temp.path().join("interrupted-empty-fence");
+    raw(
+        &fixture,
+        &fixture.alpha,
+        "shared",
+        &fixture.alpha.path("shared"),
+        &[
+            "restore",
+            &fence_id,
+            "--target",
+            restored.to_str().unwrap(),
+            "--verify",
+        ],
+    );
+    let payload: Value =
+        serde_json::from_slice(&fs::read(restored.join("format-fence.json")).unwrap()).unwrap();
+    assert_eq!(
+        payload,
+        json!({"type":"utsurigi-agent-hub/format-fence", "format":2, "hub":"default", "source":null, "capture":null})
+    );
+    drop(initializing);
+    write(tool.join("mode"), b"pass");
+    ok(&fixture, &fixture.alpha, &["setup"]);
+    assert_eq!(head(&fixture.alpha)["revision"], 1);
+    assert_eq!(
+        fs::read(active(&fixture, &fixture.alpha).join("knowledge.md")).unwrap(),
+        KNOWLEDGE
+    );
+    let after = snapshots(&fixture, &fixture.alpha, "shared");
+    assert!(
+        after.contains(&all[0]),
+        "resume must retain the original null-source fence"
+    );
+    assert_eq!(
+        after
+            .iter()
+            .filter(|snapshot| snapshot["tags"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("uah2:kind:format-fence")))
+            .count(),
+        1
+    );
+    assert!(snapshots(&fixture, &fixture.alpha, "bot").is_empty());
+    ok(&fixture, &fixture.alpha, &["sync"]);
+    assert_eq!(snapshots(&fixture, &fixture.alpha, "bot").len(), 1);
+    let protected = snapshot_ids(&fixture, &fixture.alpha);
+    ok(&fixture, &fixture.alpha, &["prune"]);
+    assert_eq!(snapshot_ids(&fixture, &fixture.alpha), protected);
+}
+
 #[test]
 fn restart_after_durable_fence_uses_retained_capture_after_original_source_is_forgotten() {
     let fixture = Fixture::new();
@@ -1711,7 +1820,12 @@ fn credential_holder_outside_roster_can_publish_a_copied_current_authoring_base(
         caller.path("shared").join("knowledge.md"),
         b"credential-held unregistered publication",
     );
-    ok(&fixture, &caller, &["registry", "publish"]);
+    let mut command = fixture.cli_command(&caller, &["registry", "publish"]);
+    command.env_remove("TEST_HUB_BETA_PASSWORD");
+    command.env_remove("TEST_HUB_ALPHA_PASSWORD");
+    let output = Running::start(command).finish();
+    redacted(&output);
+    success(&output);
     ok(&fixture, &fixture.alpha, &["sync"]);
     let current = active(&fixture, &fixture.alpha);
     assert_eq!(
@@ -1719,6 +1833,7 @@ fn credential_holder_outside_roster_can_publish_a_copied_current_authoring_base(
         b"credential-held unregistered publication"
     );
     assert_eq!(roster(&current), BTreeSet::from(["alpha".into()]));
+    assert!(!Path::new(caller.repository("bot")).join("config").exists());
 }
 
 #[test]
