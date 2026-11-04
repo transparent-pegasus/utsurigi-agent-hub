@@ -32,6 +32,8 @@ pub const STORAGE_CREDENTIAL_ENV: [&str; 3] = [
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    #[serde(skip)]
+    pub source_path: Option<PathBuf>,
     #[serde(default = "one")]
     pub version: u32,
     #[serde(default = "default_hub")]
@@ -448,6 +450,7 @@ impl Config {
             &bytes,
             "Invalid configuration: unknown key, value, or YAML syntax",
         )?;
+        config.source_path = Some(path.clone());
         let base = path
             .parent()
             .ok_or_else(|| Error::new("Invalid configuration path"))?;
