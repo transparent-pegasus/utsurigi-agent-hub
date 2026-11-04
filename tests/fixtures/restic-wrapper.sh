@@ -13,16 +13,18 @@ chmod 600 "$fixture_dir/boundary"
     printf '%s\n' '__END__'
 } >> "$fixture_dir/boundary"
 case "${RESTIC_REPOSITORY-}" in
-    s3:https://example.invalid/fake/shared) RESTIC_REPOSITORY=$(cat "$fixture_dir/repo-shared"); export RESTIC_REPOSITORY ;;
-    s3:https://example.invalid/fake/alpha) RESTIC_REPOSITORY=$(cat "$fixture_dir/repo-bot"); export RESTIC_REPOSITORY ;;
+    s3:https://compat-acceptance-42.r2.cloudflarestorage.com/fake/shared) RESTIC_REPOSITORY=$(cat "$fixture_dir/repo-shared"); export RESTIC_REPOSITORY ;;
+    s3:https://compat-acceptance-42.r2.cloudflarestorage.com/fake/alpha) RESTIC_REPOSITORY=$(cat "$fixture_dir/repo-bot"); export RESTIC_REPOSITORY ;;
+    s3:*) printf '%s\n' 'unmapped synthetic repository refused' >&2; exit 97 ;;
 esac
 original_count=$#
 for argument do
     case "$argument" in
-        s3:https://example.invalid/fake/shared) argument=$(cat "$fixture_dir/repo-shared") ;;
-        s3:https://example.invalid/fake/alpha) argument=$(cat "$fixture_dir/repo-bot") ;;
-        --repo=s3:https://example.invalid/fake/shared) argument="--repo=$(cat "$fixture_dir/repo-shared")" ;;
-        --repo=s3:https://example.invalid/fake/alpha) argument="--repo=$(cat "$fixture_dir/repo-bot")" ;;
+        s3:https://compat-acceptance-42.r2.cloudflarestorage.com/fake/shared) argument=$(cat "$fixture_dir/repo-shared") ;;
+        s3:https://compat-acceptance-42.r2.cloudflarestorage.com/fake/alpha) argument=$(cat "$fixture_dir/repo-bot") ;;
+        --repo=s3:https://compat-acceptance-42.r2.cloudflarestorage.com/fake/shared) argument="--repo=$(cat "$fixture_dir/repo-shared")" ;;
+        --repo=s3:https://compat-acceptance-42.r2.cloudflarestorage.com/fake/alpha) argument="--repo=$(cat "$fixture_dir/repo-bot")" ;;
+        s3:*|--repo=s3:*) printf '%s\n' 'unmapped synthetic repository refused' >&2; exit 97 ;;
     esac
     set -- "$@" "$argument"
 done

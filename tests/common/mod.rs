@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -12,6 +13,8 @@ pub use temp::TempDir;
 pub const SHARED_PASSWORD: &str = "synthetic-SHARED-secret-7f0b";
 pub const BOT_PASSWORD: &str = "synthetic-ALPHA-secret-9c2d";
 pub const PEER_PASSWORD: &str = "synthetic-BETA-secret-3e4a";
+pub const R2_SHARED: &str = "s3:https://compat-acceptance-42.r2.cloudflarestorage.com/fake/shared";
+pub const R2_BOT: &str = "s3:https://compat-acceptance-42.r2.cloudflarestorage.com/fake/alpha";
 pub const PAYLOAD: &[u8] = "日本語の記憶 🐎\nunique-private-payload-9f3b\0tail".as_bytes();
 
 pub const CONNECTION_ENV: [(&str, &str); 11] = [
@@ -219,8 +222,32 @@ impl Fixture {
 
     pub fn cli_command(&self, bot: &Bot, args: &[&str]) -> Command {
         let mut command = self.command(env!("CARGO_BIN_EXE_utsurigi-agent-hub"));
+        let curl_bin = self.temp.path().join("head-curl/bin");
+        if curl_bin.join("curl").is_file() {
+            let path = std::env::join_paths(std::iter::once(curl_bin).chain(
+                std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+            ))
+            .unwrap();
+            command.env("PATH", path);
+        }
         command.arg("--config").arg(&bot.file).args(args);
         command
+    }
+
+    pub fn fake_r2_head(&self, bot: &Bot, local_shared: &str) {
+        let directory = self.temp.path().join("head-curl");
+        let head = Path::new(local_shared).join("uah-head.json");
+        assert!(head.starts_with(self.temp.path()));
+        let executable = directory.join("bin/curl");
+        write(
+            &executable,
+            include_str!("../fixtures/ownerless-compat-curl.py"),
+        );
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
+        write(directory.join("fixture.json"), json!({
+            "url": format!("{}/uah-head.json", bot.repository("shared").strip_prefix("s3:").unwrap()),
+            "head_path": head,
+        }).to_string());
     }
 
     pub fn cli_env(&self, bot: &Bot, args: &[&str], env: &[(&str, &str)]) -> Output {
@@ -398,6 +425,16 @@ pub fn copy_tree(source: &Path, target: &Path) {
             fs::copy(entry.path(), destination).unwrap();
         }
     }
+}
+
+pub fn write_shared_revision(bot: &Bot, tree: &Path, revision: u64) {
+    assert!(revision > 0);
+    write(tree.join("shared-revision.json"), json!({
+        "version": 2,
+        "hub": bot.config["hub"].as_str().unwrap_or("default"),
+        "repository_sha256": format!("{:x}", Sha256::digest(bot.repository("shared").as_bytes())),
+        "revision": revision,
+    }).to_string());
 }
 
 pub fn text(output: &Output) -> String {

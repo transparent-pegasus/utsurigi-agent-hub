@@ -1098,18 +1098,8 @@ fn failed_setup_has_offline_actionable_status_without_raw_stderr_or_credentials(
         calls,
         "status must not launch storage children"
     );
-    let (failure_field, failure) = offline
-        .as_object()
-        .unwrap()
-        .iter()
-        .find(|(_, value)| {
-            value.get("operation") == Some(&json!("setup"))
-                && value
-                    .get("reason")
-                    .and_then(Value::as_str)
-                    .is_some_and(|reason| !reason.trim().is_empty())
-        })
-        .expect("status must expose a structured setup failure and reason");
+    let failure = &offline["failure"];
+    assert_eq!(failure["operation"], "setup");
     let reason = failure["reason"].as_str().unwrap().to_lowercase();
     assert!(
         reason.contains("password") || reason.contains("auth") || reason.contains("credential"),
@@ -1131,11 +1121,24 @@ fn failed_setup_has_offline_actionable_status_without_raw_stderr_or_credentials(
     for secret in [SHARED_PASSWORD, BOT_PASSWORD, PEER_PASSWORD] {
         assert!(!persisted.contains(secret));
     }
+    let persisted: Value = serde_json::from_str(&persisted).unwrap();
+    assert_eq!(persisted["failures"]["setup"]["operation"], "setup");
+    assert_eq!(persisted["failures"]["setup"]["reason"], failure["reason"]);
     write(tool.join("mode"), b"pass");
     ok(&fixture, &fixture.alpha, &["setup"]);
     assert!(
-        status(&fixture, &fixture.alpha)[failure_field].is_null(),
+        status(&fixture, &fixture.alpha)["failure"].is_null(),
         "successful retry clears the matching failure"
+    );
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(fixture.alpha.path("state").join("status.json")).unwrap())
+            .unwrap();
+    assert!(
+        persisted["failures"]
+            .as_object()
+            .unwrap()
+            .get("setup")
+            .is_none()
     );
 }
 
