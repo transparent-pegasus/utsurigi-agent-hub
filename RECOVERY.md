@@ -45,6 +45,8 @@ never delete arbitrary imports in bulk.
 
 Before handover, preserve unfinished work and stop the old runtime. Update Bot
 runtime identities using the current shared authoring base and shared credentials.
+For an existing Bot's repository change, publish the updated registry entry before
+running `setup` at the replacement repository.
 For its own handover, the new runtime publishes with user-directed
 `registry publish --takeover` after confirmation that the old runtime stopped.
 Lost-runtime takeover also requires an explicit user decision; absence is not
