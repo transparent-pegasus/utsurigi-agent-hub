@@ -1339,6 +1339,100 @@ fn v1_invalid_local_decision_binding_is_rejected_before_incompatible_fence() {
     assert_eq!(snapshot_ids(&fixture, &fixture.alpha), before);
 }
 
+#[test]
+fn migration_rejects_config_swap_to_cloned_repository_before_capture_or_fence() {
+    let fixture = Fixture::new();
+    let (source, history) = legacy(&fixture, &[&fixture.alpha]);
+    let copied_repository = fixture.temp.path().join("repositories/shared-copy");
+    copy_tree(
+        Path::new(fixture.alpha.repository("shared")),
+        &copied_repository,
+    );
+    let mut copied = Bot {
+        file: fixture.alpha.file.clone(),
+        config: fixture.alpha.config.clone(),
+    };
+    copied.config["repositories"]["shared"]["url"] = json!(copied_repository);
+    let original_a = snapshots(&fixture, &fixture.alpha, "shared");
+    let original_b = snapshots(&fixture, &copied, "shared");
+    assert_eq!(
+        original_a, original_b,
+        "quiescent clone must preserve the exact source snapshot ID"
+    );
+    assert_eq!(original_a[0]["id"], source);
+
+    let mut joiner = fixture.bot("beta", "beta-config-swap");
+    machine(&mut joiner, 8);
+    let tool = wrapper(&mut joiner, "swap-config-before-fence");
+    let original_config = fs::read(&joiner.file).unwrap();
+    let mut replacement = joiner.config.clone();
+    replacement["repositories"]["shared"]["url"] = json!(copied_repository);
+    write(
+        tool.join("replacement-config"),
+        serde_json::to_vec_pretty(&replacement).unwrap(),
+    );
+    write(tool.join("config-path"), joiner.file.to_str().unwrap());
+
+    let output = cli(&fixture, &joiner, &["setup"]);
+    redacted(&output);
+    assert!(
+        tool.join("config-swapped").is_file(),
+        "test must reach the fence/helper boundary: {}",
+        text(&output)
+    );
+    let after_a = snapshots(&fixture, &fixture.alpha, "shared");
+    let after_b = snapshots(&fixture, &copied, "shared");
+    eprintln!(
+        "config-swap source={source}; A before={} after={}; B before={} after={}; setup exit={:?}; {}",
+        original_a.len(),
+        after_a.len(),
+        original_b.len(),
+        after_b.len(),
+        output.status.code(),
+        text(&output)
+    );
+    for (name, roots) in [("A", &after_a), ("B", &after_b)] {
+        let summary: Vec<_> = roots
+            .iter()
+            .map(|snapshot| json!({"id":snapshot["id"], "tags":snapshot["tags"]}))
+            .collect();
+        eprintln!("config-swap {name} roots={}", json!(summary));
+    }
+    failure(&output);
+    assert_eq!(
+        after_a, original_a,
+        "changed config must be rejected before writing a format fence into A"
+    );
+    assert_eq!(
+        after_b, original_b,
+        "changed config must be rejected before writing a retained capture into B"
+    );
+    assert_unfenced(&fixture, &source);
+    assert!(!copied_repository.join("uah-head.json").exists());
+    assert!(
+        !after_b.iter().any(|snapshot| snapshot["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|tag| tag.starts_with("uah2:"))),
+        "changed config must leave the cloned repository unfenced"
+    );
+
+    // A rejected race must leave the original hub usable without manual repair.
+    fs::write(&joiner.file, original_config).unwrap();
+    write(tool.join("mode"), b"pass");
+    ok(&fixture, &joiner, &["setup"]);
+    let current = active(&fixture, &joiner);
+    assert_eq!(fs::read(current.join("knowledge.md")).unwrap(), KNOWLEDGE);
+    assert_history_preserved(&current, &history);
+    assert_eq!(
+        roster(&current),
+        BTreeSet::from(["alpha".into(), "beta".into()])
+    );
+    assert_eq!(snapshots(&fixture, &copied, "shared"), original_b);
+}
+
 // The wrapper stops only after the real outer --stdin-from-command backup
 // returns successfully. At that barrier the fence is durable and its native
 // append lock has been released; no test lock or forced unlock is involved.

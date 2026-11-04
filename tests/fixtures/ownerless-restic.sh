@@ -48,6 +48,12 @@ wait_for_release() {
     done
 }
 case "$mode:$operation" in
+    swap-config-before-fence:backup)
+        if [ "$fence" = true ]; then
+            cp "$directory/replacement-config" "$(cat "$directory/config-path")"
+            : > "$directory/config-swapped"
+        fi
+        ;;
     barrier-backup:backup)
         if mkdir "$directory/first-backup" 2>/dev/null; then wait_for_release; fi
         ;;
