@@ -1,0 +1,10 @@
+version: 1
+hub: __HUB__
+repository_sha256: __REPOSITORY_SHA256__
+caveman:
+  enabled: true
+  basis: user_decision
+  source: "Explicit synthetic acceptance-test decision"
+  recorded_by: synthetic-user
+  recorded_at: "2026-11-01T01:02:03Z"
+  original_decision_at: null
