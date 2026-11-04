@@ -1214,8 +1214,7 @@ fn r2_transport_failures_do_not_expose_credentials_in_diagnostics() {
             );
             let error = HeadStore::new(&config)
                 .and_then(|s| s.read())
-                .err()
-                .expect("403 must fail");
+                .expect_err("403 must fail");
             sanitized(&error.message);
             check_transport(root, 2.0);
             fixture(
@@ -1227,8 +1226,7 @@ fn r2_transport_failures_do_not_expose_credentials_in_diagnostics() {
             let observed = current(&store);
             let error = store
                 .compare_exchange(Some(&observed), &head(2, B))
-                .err()
-                .expect("500 must fail");
+                .expect_err("500 must fail");
             sanitized(&error.message);
             check_transport(root, 2.0);
         },
@@ -1256,7 +1254,7 @@ fn r2_missing_or_empty_signing_credentials_fail_without_transport() {
                     }
                     let result = HeadStore::new(&config).and_then(|store| store.read());
                     unsafe { std::env::set_var(name, &original) };
-                    let error = result.err().expect("missing signing credentials must fail");
+                    let error = result.expect_err("missing signing credentials must fail");
                     sanitized(&error.message);
                     assert!(calls(root).is_empty());
                 }
@@ -1374,8 +1372,7 @@ fn r2_stdout_and_stderr_are_bounded_even_for_malformed_responses() {
                 let start = Instant::now();
                 let error = HeadStore::new(&config)
                     .and_then(|s| s.read())
-                    .err()
-                    .expect("malformed oversized response must fail");
+                    .expect_err("malformed oversized response must fail");
                 sanitized(&error.message);
                 assert!(start.elapsed() < Duration::from_secs(8));
                 #[cfg(target_os = "linux")]
