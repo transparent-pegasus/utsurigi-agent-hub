@@ -11,6 +11,92 @@ pub struct Export {
     pub bytes: u64,
 }
 
+impl Export {
+    pub fn remove(&mut self, name: &str) -> Result<()> {
+        let path = self.tree.path().join(name);
+        no_symlinks(&path)?;
+        match fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => {
+                fs::remove_file(path)?;
+                self.bytes = self
+                    .bytes
+                    .checked_sub(metadata.len())
+                    .ok_or_else(|| Error::new("Invalid export size"))?;
+            }
+            Ok(_) => return Err(Error::new("Shared metadata must be a regular file")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.into()),
+        }
+        Ok(())
+    }
+
+    pub fn write(&mut self, name: &str, bytes: &[u8]) -> Result<()> {
+        self.remove(name)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(self.tree.path().join(name))?;
+        crate::state::private_file(&file)?;
+        file.write_all(bytes)?;
+        self.bytes = self
+            .bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| Error::new("Source size overflow"))?;
+        Ok(())
+    }
+}
+
+// Accepted remote and retained migration trees are already selected content.
+// Copy every byte and empty directory, without applying today's author filters.
+pub fn copy_verified(config: &Config, root: &Path) -> Result<Export> {
+    fn copy(root: &Path, relative: &Path, target: &Path, bytes: &mut u64) -> Result<()> {
+        no_symlinks(&root.join(relative))?;
+        private_dir(&target.join(relative))?;
+        for entry in fs::read_dir(root.join(relative))? {
+            let entry = entry?;
+            let name = relative.join(entry.file_name());
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                copy(root, &name, target, bytes)?;
+            } else if kind.is_file() {
+                let mut source = open_source(root, &name)?;
+                let before = source.metadata()?;
+                let mut output = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(target.join(&name))?;
+                crate::state::private_file(&output)?;
+                let size = std::io::copy(&mut source, &mut output)?;
+                let after = source.metadata()?;
+                if !before.is_file()
+                    || before.len() != size
+                    || before.len() != after.len()
+                    || before.modified()? != after.modified()?
+                {
+                    return Err(Error::new(
+                        "Shared source changed during copy; retry the read",
+                    ));
+                }
+                *bytes = bytes
+                    .checked_add(size)
+                    .ok_or_else(|| Error::new("Source size overflow"))?;
+            } else {
+                return Err(Error::new(
+                    "Imported symlinks and special files are not allowed",
+                ));
+            }
+        }
+        Ok(())
+    }
+    no_symlinks(root)?;
+    let tree = tempfile::Builder::new()
+        .prefix("shared-copy-")
+        .tempdir_in(config.paths.state.as_ref().expect("runtime configuration"))?;
+    let mut bytes = 0;
+    copy(root, Path::new("."), tree.path(), &mut bytes)?;
+    Ok(Export { tree, bytes })
+}
+
 fn excluded(path: &Path, extra: &GlobSet) -> bool {
     if path.ancestors().any(|ancestor| extra.is_match(ancestor)) {
         return true;

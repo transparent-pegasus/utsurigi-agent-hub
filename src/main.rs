@@ -1,6 +1,8 @@
 mod budget;
 mod config;
+mod decisions;
 mod error;
+mod head;
 mod history;
 mod migration;
 mod operations;

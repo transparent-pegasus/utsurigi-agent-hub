@@ -7,7 +7,7 @@ use crate::budget;
 use crate::config::{Config, identity};
 use crate::error::{Error, Result};
 use crate::history::History;
-use crate::registry::Registry;
+use crate::registry::{LegacyRegistry, Registry};
 use crate::restic::{Restic, Snapshot, latest, password, snapshot_id};
 use crate::selection::{self, Export};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -139,12 +139,13 @@ fn load_legacy_source(
     legacy: Option<&Snapshot>,
 ) -> Result<(Registry, History)> {
     selection::validate_import(root)?;
-    let registry = Registry::load(root, config)?;
+    let legacy_registry = LegacyRegistry::load(root, config)?;
+    let registry = legacy_registry.convert(config)?;
     if let Some(snapshot) = legacy
-        && (!snapshot.owned_by(&registry.owner.bot_id, "shared")
+        && (!snapshot.owned_by(&legacy_registry.owner.bot_id, "shared")
             || one_tag(snapshot, "hub:") != Some(config.hub.as_str())
-            || one_tag(snapshot, "bot:") != Some(registry.owner.bot_id.as_str())
-            || one_tag(snapshot, "runtime:") != Some(registry.owner.runtime_id.as_str())
+            || one_tag(snapshot, "bot:") != Some(legacy_registry.owner.bot_id.as_str())
+            || one_tag(snapshot, "runtime:") != Some(legacy_registry.owner.runtime_id.as_str())
             || one_tag(snapshot, "kind:") != Some("shared")
             || snapshot.completed_at().is_none()
             || chrono::DateTime::parse_from_rfc3339(&snapshot.time).is_err())
