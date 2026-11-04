@@ -2917,7 +2917,7 @@ fn credential_holder_can_move_its_private_repository_without_rotating_credential
     fixture.registry(&fixture.alpha, &[&fixture.alpha]);
 
     let mut outputs = Vec::new();
-    for args in [&["setup"][..], &["registry", "publish"][..], &["sync"][..]] {
+    for args in [&["registry", "publish"][..], &["setup"][..], &["sync"][..]] {
         if args == ["registry", "publish"] {
             fixture.author_current(&fixture.alpha);
             fixture.registry(&fixture.alpha, &[&fixture.alpha]);
@@ -3004,9 +3004,11 @@ fn another_credential_holder_can_move_its_private_repository_from_current() {
     fixture.ok(&beta, &["setup"]);
     fixture.ok(&beta, &["sync"]);
     let previous = Bot {
-        file: beta.file.clone(),
+        file: fixture.temp.path().join("previous-beta.yaml"),
         config: beta.config.clone(),
     };
+    previous.save();
+    fs::set_permissions(&previous.file, fs::Permissions::from_mode(0o600)).unwrap();
     let owned = fixture.ids(&previous, "bot");
     let shared = fixture.ids(&fixture.alpha, "shared");
     write(
@@ -3022,7 +3024,7 @@ fn another_credential_holder_can_move_its_private_repository_from_current() {
     for file in [&beta.file, &registry] {
         fs::set_permissions(file, fs::Permissions::from_mode(0o600)).unwrap();
     }
-    for args in [&["setup"][..], &["registry", "publish"][..], &["sync"][..]] {
+    for args in [&["registry", "publish"][..], &["setup"][..], &["sync"][..]] {
         if args == ["registry", "publish"] {
             fixture.author_current(&beta);
             fixture.registry(&beta, &[&fixture.alpha, &beta]);
