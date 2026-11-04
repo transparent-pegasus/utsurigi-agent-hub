@@ -49,8 +49,8 @@ unrelated work. Lock errors name the affected lock path.
 
 ## Sync and schedule
 
-With an initialized schedule but no current shared cache, `next_action` is `sync`.
-An uninitialized schedule still requires `setup`.
+With `joined: true`, an initialized schedule without a current shared cache gives
+`next_action: sync`. `joined: false` or an uninitialized schedule requires `setup`.
 
 Use `sync` for manual backup. Prefer native Bot scheduling to invoke
 `sync --scheduled` often enough to service `status.next_due`.
