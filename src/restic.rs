@@ -555,11 +555,7 @@ impl<'a> Restic<'a> {
         Ok(snapshot)
     }
 
-    pub(crate) fn format_fence(
-        &self,
-        config_path: &Path,
-        expected_source: Option<&str>,
-    ) -> Result<String> {
+    pub(crate) fn format_fence(&self, config_path: &Path, expected_source: &str) -> Result<String> {
         let executable = std::env::current_exe()
             .map_err(|_| Error::new("Cannot locate the migration helper executable"))?;
         let mut arguments: Vec<OsString> = vec![
@@ -579,7 +575,7 @@ impl<'a> Restic<'a> {
             executable.into_os_string(),
             crate::migration::HELPER.into(),
             config_path.as_os_str().to_owned(),
-            expected_source.unwrap_or("empty").into(),
+            expected_source.into(),
         ]);
         let bytes = self.run(&self.config.repositories.shared, &arguments, None)?;
         backup_snapshot_id(&bytes)

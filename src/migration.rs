@@ -209,6 +209,38 @@ fn source_checks(
     Ok(())
 }
 
+// An interrupted first v1 backup is recovery data, not an accepted source.
+// Only the same initial Bot/runtime may retry from its validated local candidate.
+fn validate_initial_artifacts(config: &Config, snapshots: &[Snapshot]) -> Result<()> {
+    if snapshots.iter().any(|snapshot| {
+        !snapshot.owned_by(config.id(), "shared")
+            || one_tag(snapshot, "hub:") != Some(config.hub.as_str())
+            || one_tag(snapshot, "bot:") != Some(config.id())
+            || one_tag(snapshot, "runtime:") != Some(config.runtime_id())
+            || one_tag(snapshot, "kind:") != Some("shared")
+            || snapshot
+                .tags
+                .iter()
+                .any(|tag| tag.starts_with("completed:"))
+    }) {
+        return Err(Error::new(
+            "Shared repository has uncertain history; initial retry is unsafe",
+        ));
+    }
+    Ok(())
+}
+
+fn initial_inventory(snapshots: &[Snapshot]) -> String {
+    let mut ids: Vec<_> = snapshots.iter().map(|snapshot| &snapshot.id).collect();
+    ids.sort();
+    let mut digest = Sha256::new();
+    for id in ids {
+        digest.update(id.as_bytes());
+        digest.update([0]);
+    }
+    format!("{:x}", digest.finalize())
+}
+
 fn parent_prerequisites(config: &Config, restic: &Restic<'_>) -> Result<()> {
     config.runtime()?;
     let shared = password(&config.repositories.shared)?;
@@ -316,10 +348,16 @@ fn validate_capture(
 
 /// Return the durable migration input. Activation/conversion belongs to the
 /// operations track, which must adopt only a successful conditional head write.
-/// For an empty repository, the caller MUST prevalidate its complete initial v2
-/// candidate, config, credentials and budget. This layer confirms emptiness under
-/// the append lock and durably fences it before the caller's first head CAS.
-pub fn ensure(config: &Config, restic: &Restic<'_>) -> Result<Fence> {
+/// `preflight` MUST build/validate/budget the exact final v2 registration export
+/// before this layer writes an incompatible fence. It receives the verified v1
+/// source, or None for an empty hub. On durable-fence resume it receives only the
+/// verified capture (or None); a late legacy snapshot is never selected.
+/// The supplied path is valid for the duration of the callback.
+pub fn ensure(
+    config: &Config,
+    restic: &Restic<'_>,
+    preflight: &mut dyn FnMut(Option<&Path>) -> Result<()>,
+) -> Result<Fence> {
     parent_prerequisites(config, restic)?;
     let snapshots = match restic.snapshots(&config.repositories.shared) {
         Ok(snapshots) => snapshots,
@@ -331,27 +369,38 @@ pub fn ensure(config: &Config, restic: &Restic<'_>) -> Result<Fence> {
         Err(error) => return Err(error),
     };
     if let Some(fence) = existing_fence(config, restic, &snapshots, true)? {
+        if let Some(capture) = &fence.capture {
+            let tree = temporary(config, "migration-resume-preflight-")?;
+            restic.restore(&config.repositories.shared, capture, tree.path())?;
+            preflight(Some(tree.path()))?;
+        } else {
+            preflight(None)?;
+        }
         return Ok(fence);
     }
-    let source = if snapshots.is_empty() {
-        None
-    } else {
-        let source = latest(&snapshots, "shared").ok_or_else(|| {
-            Error::new("Shared repository has uncertain history; no complete v1 source exists")
-        })?;
+    let source = if let Some(source) = latest(&snapshots, "shared") {
         let tree = temporary(config, "migration-preflight-")?;
         restic.restore(&config.repositories.shared, &source.id, tree.path())?;
         let (registry, history) = load_legacy_source(tree.path(), config, Some(source))?;
         registry.credentials(config)?;
         source_checks(config, restic, &registry, &history)?;
         budget::authorize(config, &repositories(config), tree_manifest(tree.path())?.1)?;
-        Some(source.id.as_str())
+        preflight(Some(tree.path()))?;
+        source.id.clone()
+    } else {
+        validate_initial_artifacts(config, &snapshots)?;
+        preflight(None)?;
+        if snapshots.is_empty() {
+            "empty".to_owned()
+        } else {
+            format!("incomplete:{}", initial_inventory(&snapshots))
+        }
     };
     let config_path = config
         .source_path
         .as_deref()
         .ok_or_else(|| Error::new("Migration requires a canonical configuration source path"))?;
-    let id = restic.format_fence(config_path, source)?;
+    let id = restic.format_fence(config_path, &source)?;
     // Read back the exact immutable control, then check the whole inventory for
     // contradictory concurrent fences. Never select a later legacy snapshot.
     let snapshot = restic.snapshot(&config.repositories.shared, &id)?;
@@ -373,9 +422,13 @@ pub(crate) fn helper_command() -> Option<Result<()>> {
         let expected_source = args
             .next()
             .and_then(|value| value.into_string().ok())
-            .filter(|value| value == "empty" || snapshot_id(value))
+            .filter(|value| {
+                value == "empty"
+                    || snapshot_id(value)
+                    || value.strip_prefix("incomplete:").is_some_and(snapshot_id)
+            })
             .ok_or_else(|| {
-                Error::new("Migration helper requires an expected full source ID or empty")
+                Error::new("Migration helper requires a full source ID or initial inventory")
             })?;
         if args.next().is_some() {
             return Err(Error::new("Unexpected migration helper arguments"));
@@ -391,11 +444,7 @@ pub(crate) fn helper_command() -> Option<Result<()>> {
         unsafe { std::env::remove_var("RESTIC_PASSWORD") };
         let mut restic = Restic::open(&config, false)?;
         restic.inherit_shared_password(shared_password);
-        let fence = capture_under_append_lock(
-            &config,
-            &restic,
-            (expected_source != "empty").then_some(expected_source.as_str()),
-        )?;
+        let fence = capture_under_append_lock(&config, &restic, &expected_source)?;
         let bytes = serde_json::to_vec(&Payload::from(fence))
             .map_err(|_| Error::new("Cannot encode migration fence"))?;
         budget::authorize(&config, &[repositories(&config)[0]], bytes.len() as u64)?;
@@ -407,16 +456,28 @@ pub(crate) fn helper_command() -> Option<Result<()>> {
 fn capture_under_append_lock(
     config: &Config,
     restic: &Restic<'_>,
-    expected_source: Option<&str>,
+    expected: &str,
 ) -> Result<Fence> {
+    let expected_source = snapshot_id(expected).then_some(expected);
     let snapshots = restic.snapshots(&config.repositories.shared)?;
     if let Some(fence) = existing_fence(config, restic, &snapshots, false)? {
+        if fence.source.as_deref() != expected_source {
+            return Err(Error::new(
+                "Migration source changed before the append lock; retry setup",
+            ));
+        }
         return Ok(fence);
     }
     let Some(expected_source) = expected_source else {
-        if !snapshots.is_empty() {
+        validate_initial_artifacts(config, &snapshots)?;
+        let unchanged = if expected == "empty" {
+            snapshots.is_empty()
+        } else {
+            expected.strip_prefix("incomplete:") == Some(initial_inventory(&snapshots).as_str())
+        };
+        if !unchanged {
             return Err(Error::new(
-                "Shared repository changed before empty initialization; retry setup",
+                "Shared repository changed before initial migration; retry setup",
             ));
         }
         return Ok(Fence {
