@@ -3447,9 +3447,11 @@ fn final_fix_status_reads_last_atomic_state_while_operation_lock_is_held() {
     expected["anchor"] = json!("1970-01-01T00:00:01Z");
     expected["next_due"] = json!("1970-01-02T00:00:01Z");
     expected["ready"] = json!(true);
-    expected["next_action"] = json!("sync");
+    expected["joined"] = json!(false);
+    expected["failure"] = Value::Null;
+    expected["next_action"] = json!("setup");
     expected["remediation"] =
-        json!(["Run sync to migrate the initialized schedule to the shared cache"]);
+        json!(["Run setup to register with the shared hub and initialize the schedule"]);
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
         expected
