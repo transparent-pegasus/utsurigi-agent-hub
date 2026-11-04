@@ -3741,6 +3741,8 @@ fn assert_restic_lock_wait(sync: Option<Value>, expected: &str) {
     }
     let tool = Fixture::wrapper(&mut fixture.alpha);
     fixture.ok(&fixture.alpha, &["setup"]);
+    // Shared v2 setup uses CAS; Bot-data sync exercises completion tagging.
+    fixture.ok(&fixture.alpha, &["sync"]);
     let boundary = fs::read_to_string(tool.join("boundary")).unwrap();
     let mut completion_calls = 0;
     for call in boundary.split("__CALL__\n").skip(1) {
