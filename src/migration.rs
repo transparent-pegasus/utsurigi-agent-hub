@@ -400,7 +400,11 @@ pub fn ensure(
         .source_path
         .as_deref()
         .ok_or_else(|| Error::new("Migration requires a canonical configuration source path"))?;
-    let id = restic.format_fence(config_path, &source)?;
+    let config_digest = config
+        .source_digest
+        .as_deref()
+        .ok_or_else(|| Error::new("Migration requires the parsed configuration digest"))?;
+    let id = restic.format_fence(config_path, &source, config_digest)?;
     // Read back the exact immutable control, then check the whole inventory for
     // contradictory concurrent fences. Never select a later legacy snapshot.
     let snapshot = restic.snapshot(&config.repositories.shared, &id)?;
@@ -430,10 +434,22 @@ pub(crate) fn helper_command() -> Option<Result<()>> {
             .ok_or_else(|| {
                 Error::new("Migration helper requires a full source ID or initial inventory")
             })?;
+        let expected_config_digest = args
+            .next()
+            .and_then(|value| value.into_string().ok())
+            .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .ok_or_else(|| Error::new("Migration helper requires a configuration digest"))?;
         if args.next().is_some() {
             return Err(Error::new("Unexpected migration helper arguments"));
         }
         let config = Config::load(Path::new(&path))?;
+        if config.source_path.as_deref() != Some(Path::new(&path))
+            || config.source_digest.as_deref() != Some(expected_config_digest.as_str())
+        {
+            return Err(Error::new(
+                "Configuration changed before migration; retry setup",
+            ));
+        }
         config.runtime()?;
         let shared_password = std::env::var_os("RESTIC_PASSWORD")
             .filter(|value| !value.is_empty())
