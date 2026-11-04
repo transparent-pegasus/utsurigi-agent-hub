@@ -6,7 +6,9 @@ when: Sync, backup, share, include/exclude, schedule, or cleanup requested.
 
 Run commands with `--config <bot YAML>`; inspect `status` JSON first.
 `ready` means configuration fields are complete, not remote health or successful
-setup. `next_action` is a string: `configure`, `setup`, `sync`, or `wait`.
+setup. `joined` reports completed setup/own sync. `failure` reports an unresolved
+operation failure, or `null`; follow its reason and the `remediation` strings.
+`next_action` names the operation to address, `configure`, or `wait`.
 `remediation` is an array of strings; timestamps describe local operations.
 `anchor`, `last_success`, and `next_due` in status JSON are RFC3339 strings with
 seconds in UTC (`YYYY-MM-DDTHH:MM:SSZ`), or `null` when unset. Persisted schedule
@@ -16,17 +18,20 @@ For any nonzero exit, read [RECOVERY.md](RECOVERY.md).
 ## Publish and consume
 
 Only the current runtime publishes its Bot data. `registry publish` publishes the
-owner's shared authoring tree; ordinary sync fetches shared knowledge without
-publishing local policy edits. Proposals from other Bots await owner review and
-the user's policy decision. Shared Bots place proposals in their owned tree for
-owner pull; private Bots route proposals through the user. Consume only the verified
+shared authoring tree using shared credentials. Copy the current verified shared
+version, retain `shared-revision.json`, omit generated `registry-history.json`, then edit. Stale publication fails
+and preserves local edits.
+Ordinary sync fetches shared knowledge without publishing local policy edits.
+Review proposals before applying the user's policy decision. A Bot with the
+target repository's credentials can pull proposals; otherwise route them through
+the user. Consume only the verified
 absolute version path in `status.active_shared`, never staging or an incomplete
 import. Fetch peer data on demand with `pull BOT_ID --destination NEW_DIRECTORY`.
 
 All Bots in one hub+machine use the same `paths.imports` root. The managed root is
 `paths.imports/<SHA-256(hub)>/`. It contains `versions/<snapshotID>/`, JSON `CURRENT`
 (`hub`, `current`, `previous`), and `operation.lock`.
-Before restore, compare the latest complete restic snapshot's full SHA-256 ID with
+Before restore, compare the accepted CAS head's full snapshot ID with
 the validated cached version; reuse a matching ID without restoring it again.
 A new snapshot is restored and verified under `versions/<snapshotID>/`, then
 `CURRENT` switches atomically. `status.active_shared` resolves that validated
@@ -65,7 +70,7 @@ No per-record incremental transfer or fixed latency is guaranteed.
 Local staging is plaintext and private to the host. After operations and readers
 stop, remove crash-left `export-*` trees under `paths.state` if needed.
 Protect current/previous shared versions and local originals. Repository history
-cleanup requires owner-scoped `prune`; see [RECOVERY.md](RECOVERY.md).
+cleanup requires explicit `prune`; see [RECOVERY.md](RECOVERY.md).
 
 Host exports live databases consistently and keeps exports quiescent during sync.
 Declare SQLite exports in `data.sqlite_snapshots`; live files and WAL/SHM are not

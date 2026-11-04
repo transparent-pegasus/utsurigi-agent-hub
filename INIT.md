@@ -89,7 +89,7 @@ ASK agreement; missing/null checks cannot replace this dialogue.
 - `skills.caveman.enabled`, only at hub initialization: "Should this hub use
   Caveman to shorten responses (default: the value derived below)? Existing
   instructions take priority; proxy, gateway, and model-routing features are excluded." Record
-  the answer in hub knowledge and each Bot's YAML; joining Bots reuse it.
+  the answer in shared `decisions.yaml` and each Bot's YAML; joining Bots reuse it.
 
 - `storage.bot_transfer`, only for `local` storage or when an external destination
   or transfer policy needs deciding: "Which destination and automatic or assisted
@@ -272,7 +272,7 @@ as described below before these tests use the selected account or destination.
 
 For the probe, prepare a separate private YAML with a temporary Hub/Bot identity,
 two distinct empty repository destinations, isolated owned/shared/import/state
-roots, a small non-sensitive fixture, and its owner registry. Keep the real Bot's
+roots, a small non-sensitive fixture, and its initial registry. Keep the real Bot's
 YAML unchanged. Verify both probe destinations empty, then create disposable
 password items through the selected delivery route. Use the probe YAML for CLI
 `setup`/`sync` and `restore`; these operations may externalize only the fixture.
@@ -379,17 +379,17 @@ fetch a verified generation into a fresh local directory. In a private recovery
 YAML, retain the original `hub` and point the selected `repositories.shared.url`
 or `repositories.bot.url` to that directory. Check integrity, list snapshots, and
 restore using that same repository path and YAML. Keep the prior verified generation.
-Before resuming normal operations, reconcile repository locations and registry
-authority with the owner.
+Before resuming normal operations, reconcile repository locations with the
+accepted shared registry.
 
-Create the owner's `paths.shared/registry.yaml` using this schema:
+For a new hub, create `paths.shared/registry.yaml` using this schema:
 
 ```yaml
-version: 1
+version: 2
 hub: default
-owner: {bot_id: owner, runtime_id: generated-runtime}
+max_bots: 50
 bots:
-  - id: owner
+  - id: first-bot
     runtime_id: generated-runtime
     repository: "s3:https://ACCOUNT.r2.cloudflarestorage.com/BUCKET/OPAQUE-BOT-PATH"
     password_ref: "secret-provider reference"
@@ -402,8 +402,9 @@ Runtime validation rejects placeholder URLs. Use actual configured values, inclu
 the selected hub. Bot IDs are unique within a hub's registry and may be reused in
 separate hubs. Each Bot membership gets its own repository; that hub's shared
 knowledge has another.
-The registry owner publishes admissions and policy changes; joining
-Bots consume that registry.
+Use the configured `budget.max_bots` when initializing the shared limit.
+For an existing hub, `setup` imports the current registry and registers the joining
+Bot automatically. It preserves shared knowledge and migrates v1 hubs automatically.
 
 **Confirm once.** At the end of the dialogue, show ASK answers and INFER results
 in one concise list and get one confirmation. Include the current
@@ -414,9 +415,13 @@ in YAML."
 
 After the two preflight tests pass, prepare the allowlisted files. Before backup,
 freeze the source and consistent SQLite exports, record the expected relative file
-set (Bot: `data.include` minus built-in and configured exclusions; shared:
-`paths.shared` minus built-in exclusions, without applying `data.exclude`), and
-retain a private byte-for-byte copy of those files outside all backup roots.
+set (Bot: `data.include` minus built-in and configured exclusions), and retain a
+private byte-for-byte copy outside all backup roots. For a new hub, also capture
+`paths.shared` minus built-in exclusions, without applying `data.exclude`.
+For a joining Bot, shared knowledge comes from the accepted hub state; use that
+state's preserved source/inventory. Setup does not publish the joining Bot's local
+authoring tree. If the original source is unavailable, record that source-byte
+equality cannot be proved.
 Record file sizes and hashes as an inventory, but retain the bytes for the
 comparison. Do not diff an unfiltered live root or use a restore to build
 its own expected baseline. Keep the selected sources quiescent, validate the local
@@ -432,7 +437,7 @@ Before declaring setup complete or enabling scheduling, record all of:
 - Secret injection and transfer tests passed for the selected execution context.
 - `restic --repo SELECTED_REPOSITORY_URL check` succeeds for both the shared and
   Bot repositories, using the configured/acquired binary and authorized secret
-  delivery. Coordinate the shared check with the owner in a maintenance window
+  delivery. Coordinate the shared check with other users of the repository
   while other repository operations are paused: `check` takes an exclusive lock.
   Keep normal locking and never force-unlock to make the check proceed.
   Include `-o s3.region=auto` for R2. Use `check --read-data` to also verify
@@ -445,10 +450,10 @@ Before declaring setup complete or enabling scheduling, record all of:
   `restore` rejects existing paths, including empty directories.
   Compare the full expected relative file set and every file's bytes
   with the captured backup source/export, using `cmp` or an equivalent binary
-  comparison. Include consistent database exports and the shared authoring files.
-  The additional `registry-history.json` is generated by the CLI during export;
-  require the CLI's history validation for it, not a comparison to a nonexistent
-  authoring file. Any other missing, extra, or changed file fails.
+  comparison. Include consistent database exports and unchanged shared knowledge
+  and decision files. Validate the updated registry, generated `shared-revision.json`
+  and `registry-history.json`, and any recorded migration decision supplement
+  separately. Any other missing, extra, or changed file fails.
   `restore --verify` alone does not prove equality to the intended source.
   Keep timestamps, IDs, exit status, and comparison results; never log file
   contents or secrets.

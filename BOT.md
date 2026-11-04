@@ -11,7 +11,7 @@ the host injects them securely. Never replace existing instructions.
 
 Use `utsurigi-agent-hub --config <bot YAML> <command>`. Read `status` JSON first;
 consume only verified `status.active_shared`. Only the current runtime publishes
-its Bot data; `registry publish` is owner-only.
+its Bot data. `registry publish` requires shared credentials and a current authoring base.
 For long shared reads, follow the [reader lock protocol](OPS.md#publish-and-consume).
 
 Read [INIT](INIT.md), [OPS](OPS.md), or [RECOVERY](RECOVERY.md) under the conditions
