@@ -1,6 +1,6 @@
 # utsurigi-agent-hub
 
-Use cloud storage for Bot data. Switch Bots easily.
+Use cloud storage for Bot data. No need to repeat yourself to another Bot. Switch Bots easily.
 
 Give your Bot the [Bot instructions](BOT.md) to get started.
 Setup, operations, and recovery guides load only when needed:
