@@ -30,8 +30,7 @@ cargo build --locked --release
 ./target/release/utsurigi-agent-hub --help
 ```
 
-Older storage formats have no automatic migration. Restic metadata
-records the OS username, hostname, and absolute staging paths. Restored data is
+Restic metadata records the OS username, hostname, and absolute staging paths. Restored data is
 readable by the host.
 
 ## Dialogue and configuration
@@ -131,10 +130,16 @@ an approved `false` as well. This rule covers tasks, RAG, and Caveman, not backu
 or Bot-data sharing. Hub-wide decisions already approved are reused by joining Bots.
 For Caveman, distinguish an explicit hub-wide user decision from a template value:
 only the former overrides the Bot-specific default derived from its capabilities.
-Record the value, its source (user decision or capability-derived default), and
-scope (hub-wide or this Bot) in hub knowledge. Approving this Bot's generated YAML
-does not by itself turn a derived default into a hub-wide decision; record an
-explicit confirmation of the hub-wide value as a user decision.
+Keep Bot-specific values and their basis in the Bot's YAML. Record hub-wide Caveman
+values in shared `decisions.yaml` using the [typed schema](src/decisions.rs):
+`version: 1`, the configured `hub`, and `repository_sha256`, plus a `caveman` mapping.
+The digest is the lowercase SHA-256 of the configured shared URL's UTF-8 bytes,
+verbatim, without an added newline. The mapping requires boolean `enabled`,
+`basis` (`user_decision` or `derived_default`), nonempty `source` and `recorded_by`,
+and RFC3339 `recorded_at`. Set `original_decision_at` to its known RFC3339 time or
+`null`; do not invent it. `user_decision` requires explicit hub-wide confirmation;
+`derived_default` records a default without claiming that confirmation. Approving
+one Bot's generated YAML does not turn its default into a hub-wide user decision.
 
 **YAML-ONLY**: preserve approved values or the defaults derived above; do not reset
 prior approved settings. No setup questions or automatic tuning for schema `version`,
