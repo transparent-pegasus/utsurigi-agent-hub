@@ -130,8 +130,8 @@ an approved `false` as well. This rule covers tasks, RAG, and Caveman, not backu
 or Bot-data sharing. Hub-wide decisions already approved are reused by joining Bots.
 For Caveman, distinguish an explicit hub-wide user decision from a template value:
 only the former overrides the Bot-specific default derived from its capabilities.
-Keep Bot-specific values and their basis in the Bot's YAML. Record hub-wide Caveman
-values in shared `decisions.yaml` using the [typed schema](src/decisions.rs):
+Keep Bot-specific values in the Bot's YAML and their basis in hub knowledge.
+Record hub-wide Caveman values in shared `decisions.yaml` using the [typed schema](src/decisions.rs):
 `version: 1`, the configured `hub`, and `repository_sha256`, plus a `caveman` mapping.
 The digest is the lowercase SHA-256 of the configured shared URL's UTF-8 bytes,
 verbatim, without an added newline. The mapping requires boolean `enabled`,
