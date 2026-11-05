@@ -1,4 +1,6 @@
 mod common;
+#[path = "common/tls.rs"]
+mod tls;
 
 use chrono::{DateTime, Timelike};
 use common::*;
@@ -1632,10 +1634,17 @@ fn shared_cache_validation_rejects_exact_r2_placeholder_components() {
 fn restic_children_receive_only_the_selected_password_and_safe_environment() {
     let mut fixture = Fixture::new();
     let tool = Fixture::wrapper(&mut fixture.alpha);
-    fs::write(tool.join("mode"), "tls-boundary").unwrap();
+    // Real restic must retain TLS when it starts the migration helper.
+    let process_ca = tls::write_pem(fixture.temp.path(), "process-restic-ca.pem");
+    let file_ca = tls::write_pem(fixture.temp.path(), "file-restic-ca.pem");
+    let file_client = tls::write_pem(fixture.temp.path(), "file-restic-client.pem");
     dotenv(
         &fixture.alpha,
-        "TEST_HUB_ENV_FILE_SECRET=synthetic-dotenv-child-secret\nRESTIC_CACERT=/synthetic/file-restic-ca.pem\nRESTIC_TLS_CLIENT_CERT=/synthetic/file-restic-client.pem\n",
+        format!(
+            "TEST_HUB_ENV_FILE_SECRET=synthetic-dotenv-child-secret\nRESTIC_CACERT={}\nRESTIC_TLS_CLIENT_CERT={}\n",
+            file_ca.display(),
+            file_client.display(),
+        ),
     );
     let marker = fixture.temp.path().join("must-not-execute");
     let password_command = format!("touch {}", marker.display());
@@ -1653,7 +1662,7 @@ fn restic_children_receive_only_the_selected_password_and_safe_environment() {
             "/synthetic/unwanted-repository-file",
         ),
         ("RESTIC_REST_PASSWORD", "synthetic-unrelated-rest-password"),
-        ("RESTIC_CACERT", "/synthetic/process-restic-ca.pem"),
+        ("RESTIC_CACERT", process_ca.to_str().unwrap()),
         ("RESTIC_UNKNOWN_CONTROL", "synthetic-unwanted-control"),
         ("LANG", "unwanted-locale"),
         ("LC_ALL", "unwanted-locale"),
@@ -1701,11 +1710,8 @@ fn restic_children_receive_only_the_selected_password_and_safe_environment() {
             continue;
         }
         for (name, value) in [
-            ("RESTIC_CACERT", "/synthetic/process-restic-ca.pem"),
-            (
-                "RESTIC_TLS_CLIENT_CERT",
-                "/synthetic/file-restic-client.pem",
-            ),
+            ("RESTIC_CACERT", process_ca.to_str().unwrap()),
+            ("RESTIC_TLS_CLIENT_CERT", file_client.to_str().unwrap()),
         ] {
             assert_eq!(
                 child_env(call, name),

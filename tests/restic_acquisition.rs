@@ -1,5 +1,7 @@
 #[allow(dead_code)]
 mod common;
+#[path = "common/tls.rs"]
+mod tls;
 
 use bzip2::{Compression, write::BzEncoder};
 use common::*;
@@ -219,7 +221,9 @@ fn setup_installs_a_verified_download_and_sync_reuses_it() {
 #[test]
 fn acquisition_children_receive_dotenv_connections_without_repository_or_aws_credentials() {
     let (fixture, tool, curl) = acquisition_fixture();
-    fs::write(tool.join("mode"), "tls-boundary").unwrap();
+    // Keep TLS intact through real restic's nested migration helper.
+    let ca = tls::write_pem(fixture.temp.path(), "acquisition-ca.pem");
+    let client = tls::write_pem(fixture.temp.path(), "acquisition-client.pem");
     let marker = fixture.temp.path().join("must-not-execute");
     let poison_repository = fixture.temp.path().join("wrong-repository");
     let mut document = CONNECTION_ENV
@@ -230,7 +234,11 @@ fn acquisition_children_receive_dotenv_connections_without_repository_or_aws_cre
         "AWS_ACCESS_KEY_ID=synthetic-access-key\nAWS_SECRET_ACCESS_KEY={BOT_PASSWORD}\nAWS_SESSION_TOKEN={PEER_PASSWORD}\nRESTIC_PASSWORD=synthetic-ambient-password\nRESTIC_REPOSITORY={}\nRESTIC_PASSWORD_COMMAND=touch {}\nRESTIC_REPOSITORY_FILE=/synthetic/unwanted-repository-file\nRESTIC_UNKNOWN_CONTROL=unwanted\nTEST_HUB_UNRELATED_SECRET=synthetic-unrelated-secret\n",
         poison_repository.display(), marker.display(),
     ));
-    document.push_str("RESTIC_CACERT=/synthetic/acquisition-ca.pem\nRESTIC_TLS_CLIENT_CERT=/synthetic/acquisition-client.pem\n");
+    document.push_str(&format!(
+        "RESTIC_CACERT={}\nRESTIC_TLS_CLIENT_CERT={}\n",
+        ca.display(),
+        client.display(),
+    ));
     dotenv(&fixture.alpha, document);
     let output = invoke(&fixture, &curl, "setup");
     success(&output);
@@ -288,11 +296,8 @@ fn acquisition_children_receive_dotenv_connections_without_repository_or_aws_cre
             }
         } else {
             for (name, value) in [
-                ("RESTIC_CACERT", "/synthetic/acquisition-ca.pem"),
-                (
-                    "RESTIC_TLS_CLIENT_CERT",
-                    "/synthetic/acquisition-client.pem",
-                ),
+                ("RESTIC_CACERT", ca.to_str().unwrap()),
+                ("RESTIC_TLS_CLIENT_CERT", client.to_str().unwrap()),
             ] {
                 assert_eq!(
                     child_env(call, name),
