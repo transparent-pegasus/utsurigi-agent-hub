@@ -69,13 +69,32 @@ struct Prepared {
     export: Export,
 }
 
+struct ImportedData {
+    registry: Registry,
+    history: History,
+}
+
 struct Imported {
-    data: Prepared,
+    data: ImportedData,
     observed: ObservedHead,
     cache: SharedCache,
 }
 
 impl Imported {
+    fn prepare(&self, config: &Config, restic: &Restic<'_>) -> Result<Prepared> {
+        let id = &self.observed.head.snapshot;
+        let export = self.cache.load(
+            id,
+            |path| restic.restore(&config.repositories.shared, id, path),
+            |path| selection::copy_verified(config, path),
+        )?;
+        Ok(Prepared {
+            registry: self.data.registry.clone(),
+            history: self.data.history.clone(),
+            export,
+        })
+    }
+
     fn publish(self) -> Result<()> {
         self.cache.publish(&self.observed.head.snapshot)
     }
@@ -310,12 +329,7 @@ fn import_shared(config: &Config, restic: &Restic<'_>) -> Result<Imported> {
                     "Shared snapshot revision does not match its accepted head",
                 ));
             }
-            let export = selection::copy_verified(config, path)?;
-            Ok(Prepared {
-                registry,
-                history,
-                export,
-            })
+            Ok(ImportedData { registry, history })
         },
     )?;
     Ok(Imported {
@@ -613,51 +627,40 @@ fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> 
     }
     for _ in 0..CAS_ATTEMPTS {
         let mut imported = import_shared(config, restic)?;
-        let changed = imported.data.registry.register(config)?;
-        imported.data.registry.credentials(config)?;
-        imported
-            .data
-            .history
-            .check(&imported.data.registry, restic)?;
-        private_repository(config, restic, &imported.data.history)?;
+        let mut data = imported.prepare(config, restic)?;
+        let changed = data.registry.register(config)?;
+        data.registry.credentials(config)?;
+        data.history.check(&data.registry, restic)?;
+        private_repository(config, restic, &data.history)?;
         // No Bot repository is initialized until current identity/history checks
         // and the prospective shared candidate budget have all passed.
-        let previous_history = imported.data.history.clone();
-        imported
-            .data
-            .history
-            .observe(&imported.data.registry, config, restic, true)?;
+        let previous_history = data.history.clone();
+        data.history.observe(&data.registry, config, restic, true)?;
         let revision = imported
             .observed
             .head
             .revision
             .checked_add(1)
             .ok_or_else(|| Error::new("Shared revision overflow"))?;
-        if changed || previous_history != imported.data.history {
-            rewrite_metadata(config, &mut imported.data, revision)?;
-            shared_budget(config, imported.data.export.bytes)?;
+        if changed || previous_history != data.history {
+            rewrite_metadata(config, &mut data, revision)?;
+            shared_budget(config, data.export.bytes)?;
         }
         restic.initialize(&config.repositories.bot)?;
-        imported
-            .data
-            .history
-            .observe(&imported.data.registry, config, restic, true)?;
-        imported
-            .data
-            .history
-            .check(&imported.data.registry, restic)?;
-        private_repository(config, restic, &imported.data.history)?;
-        let history_changed = previous_history != imported.data.history;
+        data.history.observe(&data.registry, config, restic, true)?;
+        data.history.check(&data.registry, restic)?;
+        private_repository(config, restic, &data.history)?;
+        let history_changed = previous_history != data.history;
         let mut predecessors = Vec::new();
         if changed || history_changed {
-            rewrite_metadata(config, &mut imported.data, revision)?;
-            shared_budget(config, imported.data.export.bytes)?;
+            rewrite_metadata(config, &mut data, revision)?;
+            shared_budget(config, data.export.bytes)?;
             if !commit_candidate(
                 config,
                 restic,
                 &store,
                 Some(&imported.observed),
-                &imported.data,
+                &data,
                 BackupGuard::Persistent,
             )? {
                 state::finish_backup(config.paths.state.as_ref().expect("runtime configuration"))?;
@@ -920,8 +923,14 @@ fn restore_selected(
     let tree = builder
         .tempdir_in(parent)
         .at("Cannot create restore staging in", parent)?;
-    restic.restore(repository, id, tree.path())?;
-    fresh_destination(path, tree)
+    let staging = tree.path().to_owned();
+    let result = restic
+        .restore(repository, id, tree.path())
+        .and_then(|()| fresh_destination(path, tree));
+    if result.is_err() {
+        let _ = selection::remove_tree(&staging);
+    }
+    result
 }
 
 fn pull(

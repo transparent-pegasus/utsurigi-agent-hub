@@ -41,6 +41,17 @@ for argument do
 done
 printf '%s\n' "$operation" >> "$fixture_dir/calls"
 case "$mode:$operation" in
+    capture-io:version) cat "/proc/$PPID/io" > "$fixture_dir/hub-io-start" ;;
+    capture-io:backup) cat "/proc/$PPID/io" > "$fixture_dir/hub-io-end" ;;
+    audit-private:backup)
+        relative=$(cat "$fixture_dir/private-relative")
+        actual=$(stat -c %a "$relative")
+        if [ "$actual" != 600 ]; then
+            printf 'private capture widened to %s before backup\n' "$actual" >&2
+            exit 1
+        fi
+        : > "$fixture_dir/private-capture-checked"
+        ;;
     offline:version) ;;
     offline:*) printf '%s\n' 'synthetic network failure' >&2; exit 1 ;;
     network:backup)

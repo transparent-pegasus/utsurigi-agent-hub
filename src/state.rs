@@ -392,17 +392,11 @@ pub fn fresh_destination(destination: &Path, staging: tempfile::TempDir) -> Resu
     })?;
     let result = (|| {
         private_dir(destination)?;
-        for entry in
-            fs::read_dir(staging.path()).at("Cannot read restore staging", staging.path())?
-        {
-            let entry = entry.at("Cannot read restore entry", staging.path())?;
-            fs::rename(entry.path(), destination.join(entry.file_name()))
-                .at("Cannot publish restored file in", destination)?;
-        }
-        Ok(())
+        private_dir(staging.path())?;
+        fs::rename(staging.path(), destination).at("Cannot publish restored tree in", destination)
     })();
     if result.is_err() {
-        let _ = fs::remove_dir_all(destination);
+        let _ = fs::remove_dir(destination);
     }
     result
 }

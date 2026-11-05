@@ -128,15 +128,18 @@ impl SharedCache {
         private_dir(&self.root.join("versions"))?;
         let pending = self.root.join("pending");
         private_dir(&pending)?;
-        let staging = tempfile::Builder::new()
+        let tree = tempfile::Builder::new()
             .prefix(".staging-")
             .tempdir_in(&pending)
             .at("Cannot stage shared import in", &pending)?;
-        restore(staging.path())?;
-        let loaded = validate(staging.path())?;
-        sync_tree(staging.path())?;
-        fs::rename(staging.path(), pending.join(id))
+        let staging = crate::selection::Export { tree, bytes: 0 };
+        private_dir(staging.tree.path())?;
+        restore(staging.tree.path())?;
+        let loaded = validate(staging.tree.path())?;
+        sync_tree(staging.tree.path())?;
+        fs::rename(staging.tree.path(), pending.join(id))
             .at("Cannot stage shared version in", &pending)?;
+        self.cleanup_pending(Some(id))?;
         File::open(&pending)
             .at("Cannot open shared path", &pending)?
             .sync_all()
@@ -144,6 +147,19 @@ impl SharedCache {
         // Callers own the parsed data, not paths or guards. Repository validation
         // and uploads can proceed without keeping any cache lock or tree alive.
         Ok(loaded)
+    }
+
+    fn cleanup_pending(&self, keep: Option<&str>) -> Result<()> {
+        let pending = self.root.join("pending");
+        for entry in fs::read_dir(&pending).at("Cannot read shared directory", &pending)? {
+            let entry = entry.at("Cannot read shared cache entry", &pending)?;
+            if keep.is_some_and(|id| entry.file_name() == id) {
+                continue;
+            }
+            no_symlinks(&entry.path())?;
+            crate::selection::remove_tree(&entry.path())?;
+        }
+        Ok(())
     }
 
     fn needs_publish(&self, pointer: &Option<Pointer>, id: &str) -> bool {
@@ -168,16 +184,29 @@ impl SharedCache {
             return Ok(());
         }
         let version = self.version(id);
-        let source = self
-            .cached(&pointer, id)?
-            .ok_or_else(|| Error::new("Complete unpublished shared cache version is missing"))?;
         let pending = self.root.join("pending");
         private_dir(&pending)?;
+        let source = match self.cached(&pointer, id)? {
+            Some(source) => source,
+            None => {
+                // A later load can supersede this owned metadata without moving CURRENT.
+                for entry in fs::read_dir(&pending).at("Cannot read shared directory", &pending)? {
+                    let entry = entry.at("Cannot read shared cache entry", &pending)?;
+                    no_symlinks(&entry.path())?;
+                    if entry.file_name().to_str().is_some_and(hex_digest) && entry.path().is_dir() {
+                        return Ok(());
+                    }
+                }
+                return Err(Error::new(
+                    "Complete unpublished shared cache version is missing",
+                ));
+            }
+        };
         if source != version {
             // An unreferenced version can remain after a crash before CURRENT was published.
             // Restore it afresh rather than trusting potentially incomplete local data.
             if version.exists() {
-                fs::remove_dir_all(&version).at("Cannot remove shared version", &version)?;
+                crate::selection::remove_tree(&version)?;
             }
             fs::rename(&source, &version).at("Cannot publish shared version", &version)?;
             File::open(self.root.join("versions"))
@@ -220,18 +249,12 @@ impl SharedCache {
             }
             if hex_digest(name) || name.starts_with(".staging-") {
                 no_symlinks(&entry.path())?;
-                fs::remove_dir_all(entry.path())
-                    .at("Cannot remove shared cache entry", &entry.path())?;
+                crate::selection::remove_tree(&entry.path())?;
             }
         }
         // No staging tree is live outside an exclusive cache section. In-flight
         // operations hold owned metadata and skip publication if CURRENT changed.
-        for entry in fs::read_dir(&pending).at("Cannot read shared directory", &pending)? {
-            let entry = entry.at("Cannot read shared cache entry", &pending)?;
-            no_symlinks(&entry.path())?;
-            fs::remove_dir_all(entry.path())
-                .at("Cannot remove shared cache entry", &entry.path())?;
-        }
+        self.cleanup_pending(None)?;
         File::open(self.root.join("versions"))
             .at("Cannot open shared path", &self.root.join("versions"))?
             .sync_all()

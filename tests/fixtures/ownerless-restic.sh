@@ -48,6 +48,45 @@ wait_for_release() {
     done
 }
 case "$mode:$operation" in
+    host-xattrs:restore|content-failure:restore)
+        verify=false
+        narrow=false
+        previous=
+        for argument do
+            if [ "$previous" = --exclude-xattr ]; then
+                if [ "$argument" != 'user.hatch_tainted*' ]; then
+                    printf '%s\n' 'fixture: unrelated xattrs must remain protected' >&2
+                    exit 98
+                fi
+                narrow=true
+            fi
+            case "$argument" in
+                --verify) verify=true ;;
+                --exclude-xattr=user.hatch_tainted\*) narrow=true ;;
+                --exclude-xattr=*)
+                    printf '%s\n' 'fixture: unrelated xattrs must remain protected' >&2
+                    exit 98 ;;
+                --include-xattr|--include-xattr=*)
+                    printf '%s\n' 'fixture: an xattr allowlist would hide unrelated attributes' >&2
+                    exit 98 ;;
+            esac
+            previous=$argument
+        done
+        if [ "$verify" != true ]; then
+            printf '%s\n' 'fixture: restore must retain --verify' >&2
+            exit 98
+        fi
+        if [ "$mode" = content-failure ]; then
+            "$directory/real-restic" "$@"
+            printf '%s\n' 'synthetic restored content verification failure' >&2
+            exit 1
+        fi
+        if [ "$narrow" != true ]; then
+            printf '%s\n' 'cannot remove enforced user.hatch_tainted.test: operation not permitted' >&2
+            exit 1
+        fi
+        : > "$directory/host-xattrs-checked"
+        ;;
     swap-config-before-fence:backup)
         if [ "$fence" = true ]; then
             cp "$directory/replacement-config" "$(cat "$directory/config-path")"

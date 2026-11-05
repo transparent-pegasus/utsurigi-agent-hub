@@ -39,6 +39,9 @@ the validated cached version; reuse a matching ID without restoring it again.
 A new snapshot is restored and verified under `versions/<snapshotID>/`, then
 `CURRENT` switches atomically. `status.active_shared` resolves that validated
 version's absolute path for the hub+machine. Keep current and previous versions.
+The cache also retains at most one complete unpublished generation under
+`pending/` for retry. Loading a newer generation removes older pending data;
+failed operations do not switch `CURRENT`.
 
 Hosts/Bots must hold a shared `flock` on the managed root's `operation.lock`
 throughout long reads. After acquiring it, reread `status.active_shared` and use
@@ -51,6 +54,10 @@ up to 30 seconds. The CLI releases the cache lock before Bot-data upload or
 unrelated work. Lock errors name the affected lock path.
 
 This cache-importing sync also backs up the selected Bot data.
+Repeated sync reuses unchanged captured Bot files and reads verified shared cache
+data without copying either full tree. It still compares Bot file contents and
+metadata; changes to source data or selection settings refresh the capture.
+Backups preserve file and directory permissions and modification times.
 
 ## Sync and schedule
 
@@ -86,7 +93,10 @@ No per-record incremental transfer or fixed latency is guaranteed.
 ## Local cleanup and data scope
 
 Local staging is plaintext and private to the host. After operations and readers
-stop, remove crash-left `export-*` trees under `paths.state` if needed.
+stop, remove crash-left `export-*` and `owned-capture-*` trees under `paths.state`
+if needed. `paths.state/owned-export` retains the latest selected Bot capture for
+reuse; it can also be removed while operations are stopped and is rebuilt on the
+next backup. Captured files are independent of the live source files.
 Protect current/previous shared versions and local originals. With versioning on,
 repository history cleanup requires explicit `prune`; see [RECOVERY.md](RECOVERY.md).
 

@@ -40,10 +40,11 @@ impl History {
         let invalid = || Error::new("Missing or invalid shared identifier history");
         let path = root.join(FILE);
         no_symlinks(&path)?;
-        if !fs::metadata(&path)
-            .at("Cannot inspect shared identifier history", &path)?
-            .is_file()
-        {
+        let metadata = match fs::metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(invalid()),
+            result => result.at("Cannot inspect shared identifier history", &path)?,
+        };
+        if !metadata.is_file() {
             return Err(invalid());
         }
         let history: Self = serde_json::from_slice(
