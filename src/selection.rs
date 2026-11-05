@@ -1,5 +1,5 @@
 use crate::config::{Config, no_symlinks, relative};
-use crate::error::{Error, Result};
+use crate::error::{Error, IoContext, Result};
 use crate::state::private_dir;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use std::fs::{self, File, OpenOptions};
@@ -12,6 +12,14 @@ pub struct Export {
 }
 
 impl Export {
+    pub fn run_id(&self) -> String {
+        self.tree
+            .path()
+            .file_name()
+            .expect("temporary directory")
+            .to_string_lossy()
+            .into_owned()
+    }
     pub fn remove(&mut self, name: &str) -> Result<()> {
         let path = self.tree.path().join(name);
         no_symlinks(&path)?;
@@ -36,7 +44,7 @@ impl Export {
             .write(true)
             .create_new(true)
             .open(self.tree.path().join(name))?;
-        crate::state::private_file(&file)?;
+        crate::state::private_file(&file, &self.tree.path().join(name))?;
         file.write_all(bytes)?;
         self.bytes = self
             .bytes
@@ -65,7 +73,7 @@ pub fn copy_verified(config: &Config, root: &Path) -> Result<Export> {
                     .write(true)
                     .create_new(true)
                     .open(target.join(&name))?;
-                crate::state::private_file(&output)?;
+                crate::state::private_file(&output, &target.join(&name))?;
                 let size = std::io::copy(&mut source, &mut output)?;
                 let after = source.metadata()?;
                 if !before.is_file()
@@ -97,99 +105,110 @@ pub fn copy_verified(config: &Config, root: &Path) -> Result<Export> {
     Ok(Export { tree, bytes })
 }
 
+const EXCLUDED_NAMES: &[&str] = &[
+    ".git",
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".azure",
+    ".kube",
+    ".docker",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "gcloud",
+    ".secrets",
+    "secrets",
+    "private_keys",
+    "credentials",
+    "auth",
+    "authentication",
+    "auth_state",
+    "auth-state",
+    "sessions",
+    "cookies",
+    ".cache",
+    "__pycache__",
+    "node_modules",
+    "models",
+    ".models",
+    "model_weights",
+    "weights",
+    "index",
+    "indexes",
+    ".indexes",
+    "generated_index",
+    "generated_indexes",
+    "generated-index",
+    "index_cache",
+    "hnsw_index",
+    "indices",
+    "vector_index",
+    "vector-index",
+    "chroma",
+    ".chroma",
+    ".lancedb",
+    "logs",
+    "model.bin",
+    "weights.bin",
+];
+
+const EXCLUDED_PREFIXES: &[&str] = &[
+    ".env.",
+    "credentials.",
+    "secrets.",
+    ".secrets.",
+    "auth.",
+    "auth_state.",
+    "auth-state.",
+    "token.",
+    "tokens.",
+    "cookies.",
+    "logs.",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+];
+
+const EXCLUDED_SUFFIXES: &[&str] = &[
+    ".env",
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+    ".keystore",
+    ".gguf",
+    ".ggml",
+    ".safetensors",
+    ".onnx",
+    ".pt",
+    ".pth",
+    ".ckpt",
+    ".faiss",
+    ".index",
+    ".log",
+    "-wal",
+    "-shm",
+    ".wal",
+    ".shm",
+];
+
 fn excluded(path: &Path, extra: &GlobSet) -> bool {
     if path.ancestors().any(|ancestor| extra.is_match(ancestor)) {
         return true;
     }
     path.components().any(|part| {
         let name = part.as_os_str().to_string_lossy().to_ascii_lowercase();
-        matches!(
-            name.as_str(),
-            ".git"
-                | ".ssh"
-                | ".gnupg"
-                | ".aws"
-                | ".azure"
-                | ".kube"
-                | ".docker"
-                | ".netrc"
-                | ".npmrc"
-                | ".pypirc"
-                | "gcloud"
-                | ".secrets"
-                | "secrets"
-                | "private_keys"
-                | "credentials"
-                | "auth"
-                | "authentication"
-                | "auth_state"
-                | "auth-state"
-                | "sessions"
-                | "cookies"
-                | ".cache"
-                | "__pycache__"
-                | "node_modules"
-                | "models"
-                | ".models"
-                | "model_weights"
-                | "weights"
-                | "index"
-                | "indexes"
-                | ".indexes"
-                | "generated_index"
-                | "generated_indexes"
-                | "generated-index"
-                | "index_cache"
-                | "hnsw_index"
-                | "indices"
-                | "vector_index"
-                | "vector-index"
-                | "chroma"
-                | ".chroma"
-                | ".lancedb"
-                | "logs"
-        ) || name == ".env"
-            || name.starts_with(".env.")
-            || name.ends_with(".env")
-            || name.starts_with("credentials.")
-            || name.starts_with("secrets.")
-            || name.starts_with(".secrets.")
-            || name.starts_with("auth.")
-            || name.starts_with("auth_state.")
-            || name.starts_with("auth-state.")
-            || name.starts_with("token.")
-            || name.starts_with("tokens.")
-            || name.starts_with("cookies.")
-            || name.starts_with("logs.")
-            || ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"]
+        EXCLUDED_NAMES.contains(&name.as_str())
+            || EXCLUDED_PREFIXES
                 .iter()
-                .any(|v| name.starts_with(v))
-            || [
-                ".pem",
-                ".key",
-                ".p12",
-                ".pfx",
-                ".keystore",
-                ".gguf",
-                ".ggml",
-                ".safetensors",
-                ".onnx",
-                ".pt",
-                ".pth",
-                ".ckpt",
-                ".faiss",
-                ".index",
-                ".log",
-                "-wal",
-                "-shm",
-                ".wal",
-                ".shm",
-            ]
-            .iter()
-            .any(|v| name.ends_with(v))
+                .any(|prefix| name.starts_with(prefix))
+            || EXCLUDED_SUFFIXES
+                .iter()
+                .any(|suffix| name.ends_with(suffix))
             || name.contains(".log.")
             || (name.starts_with("pytorch_model") && name.ends_with(".bin"))
-            || matches!(name.as_str(), "model.bin" | "weights.bin")
     })
 }
 
@@ -219,11 +238,15 @@ pub fn export(config: &Config, shared: bool) -> Result<Export> {
     let state = config.paths.state.as_ref().expect("runtime configuration");
     no_symlinks(root)?;
     if !root.is_dir() {
-        return Err(Error::new("Source root must be a directory"));
+        return Err(Error::new(format!(
+            "Source root must be a directory: {}",
+            root.display()
+        )));
     }
     let tree = tempfile::Builder::new()
         .prefix("export-")
-        .tempdir_in(state)?;
+        .tempdir_in(state)
+        .at("Cannot create export staging in", state)?;
     let extra = if shared {
         GlobSetBuilder::new()
             .build()
@@ -277,11 +300,14 @@ fn copy_tree(
     }
     let source = root.join(relative_path);
     no_symlinks(&source)?;
-    let metadata = fs::symlink_metadata(&source)?;
+    let metadata = fs::symlink_metadata(&source).at("Cannot inspect source", &source)?;
     let target = destination.join(relative_path);
     if metadata.is_dir() {
         private_dir(&target)?;
-        let mut entries: Vec<_> = fs::read_dir(&source)?.collect::<std::io::Result<_>>()?;
+        let mut entries: Vec<_> = fs::read_dir(&source)
+            .at("Cannot read source directory", &source)?
+            .collect::<std::io::Result<_>>()
+            .at("Cannot read source entry", &source)?;
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
             copy_tree(
@@ -299,14 +325,14 @@ fn copy_tree(
             return Ok(());
         }
         let mut file = open_source(root, relative_path)?;
-        let before = file.metadata()?;
+        let before = file.metadata().at("Cannot inspect source", &source)?;
         if !before.is_file() {
             return Err(Error::new(
                 "Only regular files and directories can be selected",
             ));
         }
         let mut prefix = [0u8; 16];
-        let count = file.read(&mut prefix)?;
+        let count = file.read(&mut prefix).at("Cannot read source", &source)?;
         if count == 16 && prefix == *b"SQLite format 3\0" {
             if shared
                 || !config.data.sqlite_snapshots.iter().any(|p| {
@@ -324,14 +350,19 @@ fn copy_tree(
             for suffix in ["-wal", "-shm"] {
                 let mut sidecar = source.as_os_str().to_os_string();
                 sidecar.push(suffix);
-                match fs::symlink_metadata(sidecar) {
+                match fs::symlink_metadata(&sidecar) {
                     Ok(_) => {
                         return Err(Error::new(
                             "SQLite snapshot has WAL/SHM sidecars; stop writers and export consistently",
                         ));
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                    Err(e) => return Err(e.into()),
+                    Err(e) => {
+                        return Err(Error::new(format!(
+                            "Cannot inspect SQLite sidecar {}: {e}",
+                            Path::new(&sidecar).display()
+                        )));
+                    }
                 }
             }
         }
@@ -341,13 +372,22 @@ fn copy_tree(
         let mut output = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(target)?;
-        output.write_all(&prefix[..count])?;
-        let copied = std::io::copy(&mut file, &mut output)? + count as u64;
-        let after = file.metadata()?;
+            .open(&target)
+            .at("Cannot create export", &target)?;
+        output
+            .write_all(&prefix[..count])
+            .at("Cannot write export", &target)?;
+        let copied =
+            std::io::copy(&mut file, &mut output).at("Cannot copy source", &source)? + count as u64;
+        let after = file.metadata().at("Cannot inspect source", &source)?;
         if before.len() != copied
             || before.len() != after.len()
-            || before.modified()? != after.modified()?
+            || before
+                .modified()
+                .at("Cannot read source timestamp", &source)?
+                != after
+                    .modified()
+                    .at("Cannot read source timestamp", &source)?
         {
             return Err(Error::new(
                 "Selected file changed during export; keep source snapshots quiescent",
@@ -382,7 +422,7 @@ pub(crate) fn open_source(root: &Path, relative: &Path) -> Result<File> {
             }
         })
         .peekable();
-    let mut file = File::open("/")?;
+    let mut file = File::open("/").at("Cannot open source root", Path::new("/"))?;
     // Resolve every component without following concurrent symlink replacements.
     while let Some(part) = parts.next() {
         let name = CString::new(part.as_bytes()).map_err(|_| Error::new("Invalid source path"))?;
@@ -392,9 +432,11 @@ pub(crate) fn open_source(root: &Path, relative: &Path) -> Result<File> {
         }
         let fd = unsafe { libc::openat(file.as_raw_fd(), name.as_ptr(), flags) };
         if fd < 0 {
-            return Err(Error::new(
-                "Cannot open selected source without following symlinks",
-            ));
+            return Err(Error::new(format!(
+                "Cannot open selected source without following symlinks: {}: {}",
+                root.join(relative).display(),
+                std::io::Error::last_os_error()
+            )));
         }
         file = unsafe { File::from_raw_fd(fd) };
     }
@@ -409,9 +451,11 @@ pub(crate) fn open_source(_root: &Path, _relative: &Path) -> Result<File> {
 }
 
 pub fn validate_import(root: &Path) -> Result<()> {
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let kind = entry.file_type()?;
+    for entry in fs::read_dir(root).at("Cannot read imported directory", root)? {
+        let entry = entry.at("Cannot read imported entry", root)?;
+        let kind = entry
+            .file_type()
+            .at("Cannot inspect imported entry", &entry.path())?;
         if kind.is_dir() {
             validate_import(&entry.path())?;
         } else if !kind.is_file() {
@@ -421,4 +465,41 @@ pub fn validate_import(root: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn mandatory_exclusions_match_the_operations_document() {
+        let document = include_str!("../OPS.md");
+        for (heading, end, rules) in [
+            ("- Exact names:", "- Prefixes:", EXCLUDED_NAMES),
+            ("- Prefixes:", "- Suffixes:", EXCLUDED_PREFIXES),
+            ("- Suffixes:", "- Also excluded:", EXCLUDED_SUFFIXES),
+        ] {
+            let section = document
+                .split_once(heading)
+                .unwrap()
+                .1
+                .split_once(end)
+                .unwrap()
+                .0;
+            let documented: BTreeSet<_> = section.split('`').skip(1).step_by(2).collect();
+            let implemented: BTreeSet<_> = rules.iter().copied().collect();
+            assert_eq!(documented, implemented, "{heading}");
+            assert_eq!(implemented.len(), rules.len(), "duplicate {heading}");
+        }
+        let extra = GlobSetBuilder::new().build().unwrap();
+        for path in [
+            "notes/app.log.1",
+            "models/pytorch_model-1.bin",
+            "notes/.env",
+        ] {
+            assert!(excluded(Path::new(path), &extra));
+        }
+        assert!(!excluded(Path::new("notes/decision.md"), &extra));
+    }
 }

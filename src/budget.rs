@@ -23,7 +23,12 @@ pub fn authorize(config: &Config, repositories: &[&str], source_bytes: u64) -> R
     };
     let path = config.budget.attestation_file.as_ref().ok_or_else(held)?;
     no_symlinks(path).map_err(|_| held())?;
-    let metadata = fs::metadata(path).map_err(|_| held())?;
+    let metadata = fs::metadata(path).map_err(|error| {
+        Error::new(format!(
+            "Budget hold: cannot inspect {}: {error}",
+            path.display()
+        ))
+    })?;
     if !metadata.is_file() {
         return Err(held());
     }
@@ -38,8 +43,13 @@ pub fn authorize(config: &Config, repositories: &[&str], source_bytes: u64) -> R
     return Err(Error::new(
         "Private attestation permissions require a supported Unix host",
     ));
-    let attestation: Attestation =
-        serde_json::from_slice(&fs::read(path).map_err(|_| held())?).map_err(|_| held())?;
+    let attestation: Attestation = serde_json::from_slice(&fs::read(path).map_err(|error| {
+        Error::new(format!(
+            "Budget hold: cannot read {}: {error}",
+            path.display()
+        ))
+    })?)
+    .map_err(|_| held())?;
     if attestation.expires_at <= Utc::now()
         || source_bytes > attestation.max_source_bytes
         || repositories.iter().any(|url| {

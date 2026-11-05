@@ -107,6 +107,7 @@ pub struct Fixture {
 
 impl Fixture {
     pub fn new() -> Self {
+        // Real restic key derivation is memory intensive; CI also serializes fixtures.
         static RESTIC: Mutex<()> = Mutex::new(());
         let guard = RESTIC.lock().unwrap_or_else(|error| error.into_inner());
         let temp = TempDir::new();
@@ -600,7 +601,7 @@ pub fn assert_no_plaintext(root: &Path) {
 
 pub fn assert_no_writes(directory: &Path) {
     let calls = fs::read_to_string(directory.join("calls")).unwrap();
-    for operation in ["backup", "init", "forget", "prune", "unlock"] {
+    for operation in ["backup", "init", "forget", "prune", "unlock", "tag"] {
         assert!(
             !calls.lines().any(|call| call == operation),
             "unexpected {operation}: {calls}"

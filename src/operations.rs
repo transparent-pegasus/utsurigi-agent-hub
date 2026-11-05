@@ -1,20 +1,20 @@
 use crate::config::{Config, Repository, absolute, identity, no_symlinks};
 use crate::decisions::{self, Decisions};
-use crate::error::{Error, Result};
+use crate::error::{Error, IoContext, Result};
 use crate::head::{Head, HeadStore, ObservedHead};
 use crate::history::History;
 use crate::registry::{LegacyRegistry, Registry};
-use crate::restic::{Restic, Snapshot, latest, password};
+use crate::restic::{BackupGuard, Restic, Snapshot, latest, password};
 use crate::selection::{self, Export};
 use crate::shared::{self, SharedCache};
-use crate::state::{Failure, Lock, State, fresh_destination, private_dir, private_file};
+use crate::state::{self, Failure, Lock, State, fresh_destination, private_dir, private_file};
 use crate::{Action, RegistryAction, RepositoryKind, budget, migration};
+use crate::{retention, schedule};
 use chrono::{DateTime, Datelike, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
-use utsurigi_agent_hub::{retention, schedule};
 
 const REVISION_FILE: &str = "shared-revision.json";
 const CAS_ATTEMPTS: usize = 16;
@@ -120,9 +120,16 @@ pub fn execute(path: &Path, action: Action) -> Result<()> {
         println!("{}", serde_json::json!({"skipped": true}));
         return Ok(());
     }
+    let writes = matches!(
+        action,
+        Action::Setup | Action::Sync { .. } | Action::Registry { .. } | Action::Prune
+    );
     let previous = state.clone();
     let result = (|| {
         config.runtime()?;
+        if writes {
+            state::require_reconciled(root)?;
+        }
         private_dir(
             config
                 .paths
@@ -140,7 +147,14 @@ pub fn execute(path: &Path, action: Action) -> Result<()> {
             Action::Pull {
                 bot_id,
                 destination,
-            } => pull(&config, &restic, &bot_id, &destination),
+                allow_identity_mismatch,
+            } => pull(
+                &config,
+                &restic,
+                &bot_id,
+                &destination,
+                allow_identity_mismatch,
+            ),
             Action::Restore {
                 repository,
                 snapshot,
@@ -167,6 +181,9 @@ pub fn execute(path: &Path, action: Action) -> Result<()> {
     }
     state.failures.remove(operation);
     state.save(root)?;
+    if writes && state::pending_backup(root).try_exists()? {
+        state::finish_backup(root)?;
+    }
     println!("Operation completed");
     Ok(())
 }
@@ -204,6 +221,16 @@ fn status(config: &Config) -> Result<()> {
                 .map(|field| format!("Set {field} in configuration"))
                 .collect::<Vec<_>>(),
         )
+    } else if let Some(root) = &config.paths.state
+        && state::require_reconciled(root).is_err()
+    {
+        (
+            "reconcile",
+            vec![format!(
+                "Reconcile the backup recorded in {} before another write",
+                state::pending_backup(root).display()
+            )],
+        )
     } else if let Some(failure) = failure {
         (
             failure.operation.as_str(),
@@ -219,7 +246,7 @@ fn status(config: &Config) -> Result<()> {
     } else if active_shared.is_none() {
         (
             "sync",
-            vec!["Run sync to restore the accepted shared head into the shared cache".to_owned()],
+            vec!["Run sync to restore the accepted shared head into the shared cache and back up the selected Bot data".to_owned()],
         )
     } else if state
         .next_due
@@ -241,15 +268,6 @@ fn status(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn tag<'a>(snapshot: &'a Snapshot, prefix: &str) -> Option<&'a str> {
-    let mut values = snapshot
-        .tags
-        .iter()
-        .filter_map(|tag| tag.strip_prefix(prefix));
-    let value = values.next()?;
-    values.next().is_none().then_some(value)
-}
-
 fn import_shared(config: &Config, restic: &Restic<'_>) -> Result<Imported> {
     password(&config.repositories.shared)?;
     let cache = SharedCache::open(config)?;
@@ -267,12 +285,12 @@ fn import_shared(config: &Config, restic: &Restic<'_>) -> Result<Imported> {
         })?;
     if !snapshot.kind("shared-v2")
         || snapshot.tags.len() != 6
-        || tag(snapshot, "hub:") != Some(config.hub.as_str())
-        || tag(snapshot, "bot:") != Some(snapshot.hostname.as_str())
+        || snapshot.tag("hub:") != Some(config.hub.as_str())
+        || snapshot.tag("bot:") != Some(snapshot.hostname.as_str())
         || !identity(&snapshot.hostname)
-        || !tag(snapshot, "runtime:").is_some_and(identity)
-        || !tag(snapshot, "run:").is_some_and(identity)
-        || tag(snapshot, "kind:") != Some("shared-v2")
+        || !snapshot.tag("runtime:").is_some_and(identity)
+        || !snapshot.tag("run:").is_some_and(identity)
+        || snapshot.tag("kind:") != Some("shared-v2")
         || DateTime::parse_from_rfc3339(&snapshot.time).is_err()
     {
         return Err(Error::new(
@@ -444,7 +462,7 @@ fn write_authoring(config: &Config, name: &str, bytes: &[u8]) -> Result<()> {
     let path = root.join(name);
     no_symlinks(&path)?;
     let mut temp = tempfile::NamedTempFile::new_in(root)?;
-    private_file(temp.as_file())?;
+    private_file(temp.as_file(), &path)?;
     temp.write_all(bytes)?;
     temp.flush()?;
     temp.as_file().sync_all()?;
@@ -463,12 +481,17 @@ fn commit_candidate(
     store: &HeadStore,
     expected: Option<&ObservedHead>,
     data: &Prepared,
+    guard: BackupGuard,
 ) -> Result<bool> {
     let revision = expected
         .map_or(Some(1), |head| head.head.revision.checked_add(1))
         .ok_or_else(|| Error::new("Shared revision overflow"))?;
-    let snapshot =
-        restic.backup_uncommitted(&config.repositories.shared, &data.export, "shared-v2")?;
+    let snapshot = restic.backup_uncommitted(
+        &config.repositories.shared,
+        &data.export,
+        "shared-v2",
+        guard,
+    )?;
     store.compare_exchange(
         expected,
         &Head {
@@ -564,7 +587,14 @@ fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> 
             fence.ok_or_else(|| Error::new("Migration source changed repeatedly; retry setup"))?;
         let data =
             prepared.ok_or_else(|| Error::new("Migration candidate preflight did not complete"))?;
-        if commit_candidate(config, restic, &store, None, &data)? {
+        if commit_candidate(
+            config,
+            restic,
+            &store,
+            None,
+            &data,
+            BackupGuard::InitialSetup,
+        )? {
             // Only the successful initial author's content receives this base.
             // A joiner or a losing initializer never relabels local content.
             if fence.source.is_none() {
@@ -618,6 +648,7 @@ fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> 
             .check(&imported.data.registry, restic)?;
         private_repository(config, restic, &imported.data.history)?;
         let history_changed = previous_history != imported.data.history;
+        let mut predecessors = Vec::new();
         if changed || history_changed {
             rewrite_metadata(config, &mut imported.data, revision)?;
             shared_budget(config, imported.data.export.bytes)?;
@@ -627,14 +658,18 @@ fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> 
                 &store,
                 Some(&imported.observed),
                 &imported.data,
+                BackupGuard::Persistent,
             )? {
+                state::finish_backup(config.paths.state.as_ref().expect("runtime configuration"))?;
                 continue;
             }
+            predecessors.push(imported.observed.head.snapshot.clone());
             imported = import_shared(config, restic)?;
             imported.data.registry.current(config)?;
         }
         initialize_schedule(config, state)?;
         imported.publish()?;
+        cleanup_predecessors(config, restic, &config.repositories.shared, predecessors)?;
         state.joined = true;
         return Ok(());
     }
@@ -669,7 +704,12 @@ fn sync(config: &Config, restic: &Restic<'_>, state: &mut State, scheduled: bool
             .expect("runtime configuration")],
         export.bytes,
     )?;
-    restic.backup(&config.repositories.bot, &export, "bot")?;
+    let predecessors = restic.backup(
+        &config.repositories.bot,
+        &export,
+        "bot",
+        BackupGuard::Persistent,
+    )?;
     let completed = Utc::now().timestamp();
     state.last_success = Some(completed);
     if scheduled {
@@ -680,6 +720,7 @@ fn sync(config: &Config, restic: &Restic<'_>, state: &mut State, scheduled: bool
         )?);
     }
     imported.publish()?;
+    cleanup_predecessors(config, restic, &config.repositories.bot, predecessors)?;
     state.joined = true;
     Ok(())
 }
@@ -744,13 +785,18 @@ fn publish(config: &Config, restic: &Restic<'_>, takeover: bool) -> Result<()> {
         history: imported.data.history,
         export,
     };
+    let store = HeadStore::new(config)?;
     if !commit_candidate(
         config,
         restic,
-        &HeadStore::new(config)?,
+        &store,
         Some(&imported.observed),
         &data,
+        BackupGuard::Persistent,
     )? {
+        // A definite CAS loss is safe to reconcile with a fresh authoring base;
+        // retain the losing immutable candidate for inspection.
+        state::finish_backup(config.paths.state.as_ref().expect("runtime configuration"))?;
         return Err(Error::new(
             "Shared publication lost a head conflict; reconcile edits with the current authoring base and explicitly publish again; local work was preserved",
         ));
@@ -760,7 +806,32 @@ fn publish(config: &Config, restic: &Restic<'_>, takeover: bool) -> Result<()> {
         REVISION_FILE,
         &fs::read(data.export.tree.path().join(REVISION_FILE))?,
     )?;
-    import_shared(config, restic)?.publish()
+    import_shared(config, restic)?.publish()?;
+    cleanup_predecessors(
+        config,
+        restic,
+        &config.repositories.shared,
+        vec![imported.observed.head.snapshot],
+    )
+}
+
+fn cleanup_predecessors(
+    config: &Config,
+    restic: &Restic<'_>,
+    repository: &Repository,
+    predecessors: Vec<String>,
+) -> Result<()> {
+    if !config.sync.versioning && !predecessors.is_empty() {
+        budget::authorize(
+            config,
+            &[repository.url.as_deref().expect("runtime configuration")],
+            0,
+        )?;
+        let mut args: Vec<std::ffi::OsString> = vec!["forget".into(), "--prune".into()];
+        args.extend(predecessors.into_iter().map(std::ffi::OsString::from));
+        restic.run(repository, &args, None)?;
+    }
+    Ok(())
 }
 
 fn destination(config: &Config, path: &Path) -> Result<std::path::PathBuf> {
@@ -827,18 +898,40 @@ fn recover(
             "Snapshot ID must identify exactly one snapshot (at least eight hex digits)",
         ));
     }
+    restore_selected(restic, repository, &selected[0].id, &path)
+}
+
+fn restore_selected(
+    restic: &Restic<'_>,
+    repository: &Repository,
+    id: &str,
+    path: &Path,
+) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| Error::new("Invalid restore destination"))?;
-    let tree = tempfile::Builder::new()
-        .prefix(".utsurigi-agent-hub-restore-")
-        .tempdir_in(parent)?;
-    restic.restore(repository, &selected[0].id, tree.path())?;
-    fresh_destination(&path, tree)
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".utsurigi-agent-hub-restore-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o700));
+    }
+    let tree = builder
+        .tempdir_in(parent)
+        .at("Cannot create restore staging in", parent)?;
+    restic.restore(repository, id, tree.path())?;
+    fresh_destination(path, tree)
 }
 
-fn pull(config: &Config, restic: &Restic<'_>, id: &str, path: &Path) -> Result<()> {
-    destination(config, path)?;
+fn pull(
+    config: &Config,
+    restic: &Restic<'_>,
+    id: &str,
+    path: &Path,
+    allow_identity_mismatch: bool,
+) -> Result<()> {
+    let path = destination(config, path)?;
     let imported = import_shared(config, restic)?;
     imported.data.registry.access_checks(config)?;
     imported
@@ -848,20 +941,25 @@ fn pull(config: &Config, restic: &Restic<'_>, id: &str, path: &Path) -> Result<(
     let peer = imported.data.registry.entry(id)?;
     let repository = peer.repository();
     password(&repository)?;
-    let snapshots: Vec<_> = restic
-        .snapshots(&repository)?
-        .into_iter()
-        .filter(|snapshot| {
-            snapshot.owned_by(id, "bot")
-                && tag(snapshot, "bot:") == Some(id)
-                && tag(snapshot, "runtime:") == Some(peer.runtime_id.as_str())
-                && tag(snapshot, "kind:") == Some("bot")
+    let snapshots = restic.snapshots(&repository)?;
+    // Inspect the latest complete version; do not silently fall back to an old identity.
+    let snapshot = snapshots
+        .iter()
+        .filter(|snapshot| snapshot.completed_at().is_some())
+        .max_by_key(|snapshot| {
+            (
+                snapshot.completed_at(),
+                DateTime::parse_from_rfc3339(&snapshot.time).ok(),
+                &snapshot.id,
+            )
         })
-        .collect();
-    let snapshot = latest(&snapshots, "bot").ok_or_else(|| {
-        Error::new("No complete peer snapshot matches the current Bot/runtime source identity")
-    })?;
-    recover(config, restic, &repository, &snapshot.id, path)
+        .ok_or_else(|| Error::new("No complete peer snapshot is available"))?;
+    if !snapshot.matches_identity(id, &peer.runtime_id, "bot") && !allow_identity_mismatch {
+        return Err(Error::new(
+            "Peer snapshot identity differs from the registry; inspect it and explicitly use --allow-identity-mismatch to continue",
+        ));
+    }
+    restore_selected(restic, &repository, &snapshot.id, &path)
 }
 
 fn prune(config: &Config, restic: &Restic<'_>) -> Result<()> {

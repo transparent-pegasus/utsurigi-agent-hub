@@ -1,4 +1,4 @@
-use crate::error::{Error, Result};
+use crate::error::{Error, IoContext, Result};
 use serde::{Deserialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -30,7 +30,7 @@ pub const STORAGE_CREDENTIAL_ENV: [&str; 3] = [
     "AWS_SESSION_TOKEN",
 ];
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     #[serde(skip)]
@@ -61,7 +61,7 @@ pub struct Config {
     pub onboarding: Onboarding,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Bot {
     pub id: Option<String>,
@@ -70,14 +70,14 @@ pub struct Bot {
     pub role: Option<String>,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Machine {
     pub id: Option<String>,
     pub root: Option<PathBuf>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Storage {
     pub provider: String,
@@ -97,7 +97,7 @@ impl Default for Storage {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Secrets {
     pub provider: String,
@@ -113,7 +113,7 @@ impl Default for Secrets {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Encryption {
     pub executable: PathBuf,
@@ -129,14 +129,14 @@ impl Default for Encryption {
     }
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Repositories {
     pub shared: Repository,
     pub bot: Repository,
 }
 
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Repository {
     pub url: Option<String>,
@@ -144,7 +144,7 @@ pub struct Repository {
     pub password_env: Option<String>,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Paths {
     pub owned: Option<PathBuf>,
@@ -153,7 +153,7 @@ pub struct Paths {
     pub state: Option<PathBuf>,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Data {
     pub include: Vec<PathBuf>,
@@ -164,7 +164,7 @@ pub struct Data {
     pub local: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Sharing {
     pub bot_data: bool,
@@ -175,11 +175,12 @@ impl Default for Sharing {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Sync {
     pub interval_seconds: u64,
     pub start_time: String,
+    pub versioning: bool,
     pub history_retention_seconds: u64,
     pub retry_lock_seconds: u64,
     pub transport_retries: u32,
@@ -194,6 +195,7 @@ impl Default for Sync {
         Self {
             interval_seconds: 86400,
             start_time: "03:00".into(),
+            versioning: true,
             history_retention_seconds: 2592000,
             retry_lock_seconds: 120,
             transport_retries: 5,
@@ -206,7 +208,7 @@ impl Default for Sync {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Budget {
     pub free_tier_only: bool,
@@ -225,7 +227,7 @@ impl Default for Budget {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Tasks {
     pub enabled: bool,
@@ -236,7 +238,7 @@ impl Default for Tasks {
     }
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Memory {
     pub enabled: bool,
@@ -244,12 +246,12 @@ pub struct Memory {
     pub retrieval_bot_id: Option<String>,
     pub existing_source: Option<String>,
 }
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Skills {
     pub caveman: Caveman,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Caveman {
     pub enabled: bool,
@@ -265,12 +267,12 @@ impl Default for Caveman {
         }
     }
 }
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Review {
     pub reviewer_bot: Option<String>,
 }
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Onboarding {
     pub config_blob_url: Option<String>,
@@ -404,11 +406,19 @@ pub fn no_symlinks(path: &Path) -> Result<()> {
         cursor.push(component);
         match fs::symlink_metadata(&cursor) {
             Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(Error::new("Symlink paths are not allowed"));
+                return Err(Error::new(format!(
+                    "Symlink paths are not allowed: {}",
+                    cursor.display()
+                )));
             }
             Ok(_) => (),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                return Err(Error::new(format!(
+                    "Cannot inspect path {}: {e}",
+                    cursor.display()
+                )));
+            }
         }
     }
     Ok(())
@@ -447,8 +457,8 @@ pub fn parse_yaml<T: DeserializeOwned>(bytes: &[u8], invalid: &'static str) -> R
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
-        let path = fs::canonicalize(path).map_err(|_| Error::new("Cannot read configuration"))?;
-        let bytes = fs::read(&path).map_err(|_| Error::new("Cannot read configuration"))?;
+        let path = fs::canonicalize(path).at("Cannot read configuration", path)?;
+        let bytes = fs::read(&path).at("Cannot read configuration", &path)?;
         let mut config: Self = parse_yaml(
             &bytes,
             "Invalid configuration: unknown key, value, or YAML syntax",
@@ -473,6 +483,14 @@ impl Config {
         }
         if config.encryption.executable.components().count() > 1 {
             config.encryption.executable = absolute(base, &config.encryption.executable)?;
+        }
+        for repository in [
+            &mut config.repositories.shared,
+            &mut config.repositories.bot,
+        ] {
+            if repository.password_ref.as_deref() == Some("") {
+                repository.password_ref = None;
+            }
         }
         config.validate()?;
         Ok(config)
@@ -512,7 +530,7 @@ impl Config {
         {
             return Err(Error::new("Invalid Bot platform"));
         }
-        utsurigi_agent_hub::schedule::first_anchor(
+        crate::schedule::first_anchor(
             0,
             self.timezone.as_deref().unwrap_or("UTC"),
             &self.sync.start_time,
@@ -709,5 +727,19 @@ impl Config {
             .runtime_id
             .as_deref()
             .expect("runtime configuration")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn omitted_fields_match_the_complete_public_template() {
+        let omitted: Config =
+            parse_yaml(b"{}", "empty config").unwrap_or_else(|e| panic!("{}", e.message));
+        let template: Config = parse_yaml(include_bytes!("../config.yaml"), "template")
+            .unwrap_or_else(|e| panic!("{}", e.message));
+        assert_eq!(omitted, template);
     }
 }

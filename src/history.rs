@@ -1,7 +1,7 @@
 use crate::config::{Config, Repository, env_name, no_symlinks};
-use crate::error::{Error, Result};
+use crate::error::{Error, IoContext, Result};
 use crate::registry::Registry;
-use crate::restic::{Restic, password, snapshot_id};
+use crate::restic::{Restic, hex_digest, password};
 use crate::selection::Export;
 use crate::state::private_file;
 use serde::{Deserialize, Serialize};
@@ -40,11 +40,16 @@ impl History {
         let invalid = || Error::new("Missing or invalid shared identifier history");
         let path = root.join(FILE);
         no_symlinks(&path)?;
-        if !fs::metadata(&path).map_err(|_| invalid())?.is_file() {
+        if !fs::metadata(&path)
+            .at("Cannot inspect shared identifier history", &path)?
+            .is_file()
+        {
             return Err(invalid());
         }
-        let history: Self = serde_json::from_slice(&fs::read(path).map_err(|_| invalid())?)
-            .map_err(|_| invalid())?;
+        let history: Self = serde_json::from_slice(
+            &fs::read(&path).at("Cannot read shared identifier history", &path)?,
+        )
+        .map_err(|_| invalid())?;
         if history.version != 1
             || history.repository_urls.is_empty()
             || history.password_envs.is_empty()
@@ -58,7 +63,7 @@ impl History {
                 .iter()
                 .any(|reference| reference.is_empty())
             || history.password_envs.iter().any(|name| !env_name(name))
-            || history.repository_ids.iter().any(|id| !snapshot_id(id))
+            || history.repository_ids.iter().any(|id| !hex_digest(id))
         {
             return Err(invalid());
         }
@@ -183,11 +188,17 @@ impl History {
             .write(true)
             .create_new(true)
             .open(export.tree.path().join(FILE))
-            .map_err(|_| {
-                Error::new("registry-history.json is reserved generated shared metadata")
+            .map_err(|error| {
+                Error::new(format!(
+                    "registry-history.json is reserved generated shared metadata: {}: {error}",
+                    export.tree.path().join(FILE).display()
+                ))
             })?;
-        private_file(&file)?;
-        file.write_all(&bytes)?;
+        private_file(&file, &export.tree.path().join(FILE))?;
+        file.write_all(&bytes).at(
+            "Cannot write shared identifier history",
+            &export.tree.path().join(FILE),
+        )?;
         export.bytes = export
             .bytes
             .checked_add(bytes.len() as u64)

@@ -33,7 +33,7 @@ operation=other
 for argument do
     case "$argument" in
         version|--version|-V) operation=version; break ;;
-        init|backup|restore|snapshots|forget|prune|unlock|check|cat|ls)
+        init|backup|restore|snapshots|forget|prune|unlock|tag|check|cat|ls)
             operation=$argument
             break
             ;;
@@ -48,6 +48,8 @@ case "$mode:$operation" in
         exit 1
         ;;
     auth:backup) printf '%s\n' 'Fatal: wrong password or no key found' >&2; exit 1 ;;
+    tag-failure:tag|forget-failure:forget)
+        printf "%s\n" "synthetic write failure" >&2; exit 1 ;;
     partial:backup)
         "$fixture_dir/real-restic" "$@"
         exit 3
@@ -56,6 +58,14 @@ case "$mode:$operation" in
         "$fixture_dir/real-restic" "$@"
         printf '%s\n' 'synthetic connection lost after upload' >&2
         exit 1
+        ;;
+    publish-import-failure:backup)
+        "$fixture_dir/real-restic" "$@"
+        : > "$fixture_dir/uploaded"
+        exit 0
+        ;;
+    publish-import-failure:restore)
+        if [ -f "$fixture_dir/uploaded" ]; then exit 1; fi
         ;;
     restore-failure:restore)
         # Optional exact target keeps control validation real before the data fault.
@@ -74,7 +84,17 @@ case "$mode:$operation" in
         printf '%s\n' 'synthetic interrupted restore' >&2
         exit 1
         ;;
+    stall-backup:backup)
+        : > "$fixture_dir/backup-started"
+        while [ ! -e "$fixture_dir/release" ]; do sleep 0.01; done
+        ;;
+    fail-backup:backup) printf '%s\n' 'synthetic upload failure' >&2; exit 1 ;;
 esac
 # Record TLS filename delivery without opening certificate files in local storage tests.
 if [ "$mode" = tls-boundary ]; then unset RESTIC_CACERT RESTIC_TLS_CLIENT_CERT; fi
+if [ "$operation" = snapshots ]; then
+    "$fixture_dir/real-restic" "$@"
+    : > "$fixture_dir/snapshots-returned"
+    exit 0
+fi
 exec "$fixture_dir/real-restic" "$@"

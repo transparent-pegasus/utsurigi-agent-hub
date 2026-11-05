@@ -104,6 +104,13 @@ fn assert_incomplete(fixture: &Fixture, directory: &Path, before: &Value) {
         1
     );
     assert!(!observed.iter().any(|args| operation(args) == "tag"));
+    assert!(
+        fixture
+            .alpha
+            .path("state")
+            .join("pending-backup.yaml")
+            .is_file()
+    );
     assert_eq!(fixture.status(&fixture.alpha), *before);
     let snapshots = fixture.snapshots(&fixture.alpha, "bot");
     assert!(!snapshots.is_empty(), "the real write must have happened");
@@ -239,6 +246,8 @@ fn malformed_backup_json_never_completes_or_replays_a_write() {
         fs::write(directory.join("observed"), "").unwrap();
         failure(&fixture.cli(&fixture.alpha, &["sync"]));
         assert_incomplete(&fixture, &directory, &before);
+        // The fixture has inspected the incomplete write; reconcile before the next injected case.
+        fs::remove_file(fixture.alpha.path("state").join("pending-backup.yaml")).unwrap();
     }
     fs::write(directory.join("summary-mode"), "duplicate").unwrap();
     fs::write(directory.join("observed"), "").unwrap();
@@ -284,6 +293,8 @@ fn summary_snapshot_metadata_must_match_the_current_write() {
         fs::write(directory.join("observed"), "").unwrap();
         failure(&fixture.cli(&fixture.alpha, &["sync"]));
         assert_incomplete(&fixture, &directory, &before);
+        // Each mutation is a separate, explicitly reconciled attempt.
+        fs::remove_file(fixture.alpha.path("state").join("pending-backup.yaml")).unwrap();
     }
 }
 

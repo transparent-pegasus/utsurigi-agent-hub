@@ -1,5 +1,5 @@
 use crate::config::no_symlinks;
-use crate::error::{Error, Result};
+use crate::error::{Error, IoContext, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -18,6 +18,7 @@ pub struct State {
     pub joined: bool,
     #[serde(default)]
     pub failures: BTreeMap<String, Failure>,
+    // Read legacy state, but derive the active cache exclusively from CURRENT.
     #[serde(default, rename = "active_shared", skip_serializing)]
     pub _active_shared: Option<PathBuf>,
 }
@@ -149,20 +150,31 @@ pub struct Lock {
 
 pub fn private_dir(path: &Path) -> Result<()> {
     no_symlinks(path)?;
-    fs::create_dir_all(path)?;
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(path)
+        .at("Cannot create private directory", path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .at("Cannot protect directory", path)?;
     }
     Ok(())
 }
 
-pub fn private_file(file: &File) -> Result<()> {
+pub fn private_file(file: &File, path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .at("Cannot protect file", path)?;
     }
     Ok(())
 }
@@ -218,7 +230,7 @@ impl Lock {
                     path.display()
                 ))
             })?;
-        private_file(&file).map_err(|error| {
+        private_file(&file, &path).map_err(|error| {
             Error::new(format!(
                 "Cannot protect {kind} lock at {}: {}",
                 path.display(),
@@ -265,7 +277,7 @@ impl State {
     pub fn load(root: &Path, hub: &str) -> Result<Self> {
         let path = root.join("status.json");
         no_symlinks(&path)?;
-        match fs::read(path) {
+        match fs::read(&path) {
             Ok(bytes) => {
                 let state: Self = serde_json::from_slice(&bytes)
                     .map_err(|_| Error::new("Invalid persisted state"))?;
@@ -280,35 +292,112 @@ impl State {
                 hub: hub.to_owned(),
                 ..Self::default()
             }),
-            Err(e) => Err(e.into()),
+            Err(e) => Err(Error::new(format!(
+                "Cannot read state {}: {e}",
+                path.display()
+            ))),
         }
     }
 
     pub fn save(&self, root: &Path) -> Result<()> {
-        let mut temp = tempfile::NamedTempFile::new_in(root)?;
-        private_file(temp.as_file())?;
-        serde_json::to_writer(&mut temp, self).map_err(|_| Error::new("Cannot encode state"))?;
-        temp.flush()?;
-        temp.as_file().sync_all()?;
-        no_symlinks(&root.join("status.json"))?;
-        temp.persist(root.join("status.json"))
-            .map_err(|_| Error::new("Cannot publish state"))?;
-        File::open(root)?.sync_all()?;
-        Ok(())
+        let bytes = serde_json::to_vec(self).map_err(|_| Error::new("Cannot encode state"))?;
+        write_private(&root.join("status.json"), &bytes)
     }
+}
+
+/// Publish a private local record only after its contents have reached disk.
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    let root = path
+        .parent()
+        .ok_or_else(|| Error::new("Record requires a parent directory"))?;
+    let mut temp = tempfile::NamedTempFile::new_in(root).at("Cannot stage record in", root)?;
+    private_file(temp.as_file(), path)?;
+    temp.write_all(bytes).at("Cannot write record", path)?;
+    temp.flush().at("Cannot flush record", path)?;
+    temp.as_file().sync_all().at("Cannot sync record", path)?;
+    no_symlinks(path)?;
+    temp.persist(path).map_err(|error| {
+        Error::new(format!(
+            "Cannot publish record {}: {}",
+            path.display(),
+            error.error
+        ))
+    })?;
+    File::open(root)
+        .at("Cannot open directory", root)?
+        .sync_all()
+        .at("Cannot sync directory", root)
+}
+
+pub fn pending_backup(root: &Path) -> PathBuf {
+    root.join("pending-backup.yaml")
+}
+
+pub fn require_reconciled(root: &Path) -> Result<()> {
+    let path = pending_backup(root);
+    no_symlinks(&path)?;
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::new(format!(
+            "Cannot inspect {}: {error}",
+            path.display()
+        ))),
+        Ok(_) => Err(Error::new(format!(
+            "Previous backup needs reconciliation; inspect snapshots using {}, reconcile the recorded run, then remove this file before another write",
+            path.display()
+        ))),
+    }
+}
+
+pub fn begin_backup(
+    config: &crate::config::Config,
+    repository: &crate::config::Repository,
+    export: &crate::selection::Export,
+    kind: &str,
+) -> Result<()> {
+    let root = config.paths.state.as_ref().expect("runtime configuration");
+    require_reconciled(root)?;
+    let record = serde_json::json!({
+        "version": 1, "hub": config.hub, "bot": config.id(),
+        "runtime": config.runtime_id(), "repository": repository.url,
+        "kind": kind, "run": export.run_id(),
+    });
+    // All fields are scalars. JSON quoting is valid YAML and preserves unusual paths.
+    let yaml: String = record
+        .as_object()
+        .expect("record mapping")
+        .iter()
+        .map(|(key, value)| format!("{key}: {value}\n"))
+        .collect();
+    write_private(&pending_backup(root), yaml.as_bytes())
+}
+
+pub fn finish_backup(root: &Path) -> Result<()> {
+    let path = pending_backup(root);
+    fs::remove_file(&path).at("Cannot clear backup record", &path)?;
+    File::open(root)
+        .at("Cannot open directory", root)?
+        .sync_all()
+        .at("Cannot sync directory", root)
 }
 
 pub fn fresh_destination(destination: &Path, staging: tempfile::TempDir) -> Result<()> {
     no_symlinks(destination)?;
     // Reserve the destination exclusively before moving the validated tree.
-    fs::create_dir(destination).map_err(|_| {
-        Error::new("Restore destination must be a new directory with an existing parent")
+    fs::create_dir(destination).map_err(|error| {
+        Error::new(format!(
+            "Restore destination must be a new directory with an existing parent: {}: {error}",
+            destination.display()
+        ))
     })?;
     let result = (|| {
         private_dir(destination)?;
-        for entry in fs::read_dir(staging.path())? {
-            let entry = entry?;
-            fs::rename(entry.path(), destination.join(entry.file_name()))?;
+        for entry in
+            fs::read_dir(staging.path()).at("Cannot read restore staging", staging.path())?
+        {
+            let entry = entry.at("Cannot read restore entry", staging.path())?;
+            fs::rename(entry.path(), destination.join(entry.file_name()))
+                .at("Cannot publish restored file in", destination)?;
         }
         Ok(())
     })();

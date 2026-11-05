@@ -1,11 +1,10 @@
 use crate::config::{Config, no_symlinks};
-use crate::error::{Error, Result};
-use crate::restic::snapshot_id;
-use crate::state::{Lock, private_dir, private_file};
+use crate::error::{Error, IoContext, Result};
+use crate::restic::hex_digest;
+use crate::state::{Lock, private_dir, write_private};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Deserialize, Serialize, PartialEq, Eq)]
@@ -40,19 +39,24 @@ fn root(config: &Config) -> Option<PathBuf> {
 fn read_pointer(root: &Path, hub: &str) -> Result<Option<Pointer>> {
     let path = root.join("CURRENT");
     no_symlinks(&path)?;
-    let bytes = match fs::read(path) {
+    let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
+        Err(error) => {
+            return Err(Error::new(format!(
+                "Cannot read shared CURRENT {}: {error}",
+                path.display()
+            )));
+        }
     };
     let pointer: Pointer =
         serde_json::from_slice(&bytes).map_err(|_| Error::new("Invalid shared CURRENT pointer"))?;
     if pointer.hub != hub
-        || !snapshot_id(&pointer.current)
+        || !hex_digest(&pointer.current)
         || pointer
             .previous
             .as_ref()
-            .is_some_and(|previous| !snapshot_id(previous) || previous == &pointer.current)
+            .is_some_and(|previous| !hex_digest(previous) || previous == &pointer.current)
     {
         return Err(Error::new("Invalid shared CURRENT pointer"));
     }
@@ -126,12 +130,17 @@ impl SharedCache {
         private_dir(&pending)?;
         let staging = tempfile::Builder::new()
             .prefix(".staging-")
-            .tempdir_in(&pending)?;
+            .tempdir_in(&pending)
+            .at("Cannot stage shared import in", &pending)?;
         restore(staging.path())?;
         let loaded = validate(staging.path())?;
         sync_tree(staging.path())?;
-        fs::rename(staging.path(), pending.join(id))?;
-        File::open(pending)?.sync_all()?;
+        fs::rename(staging.path(), pending.join(id))
+            .at("Cannot stage shared version in", &pending)?;
+        File::open(&pending)
+            .at("Cannot open shared path", &pending)?
+            .sync_all()
+            .at("Cannot sync shared path", &pending)?;
         // Callers own the parsed data, not paths or guards. Repository validation
         // and uploads can proceed without keeping any cache lock or tree alive.
         Ok(loaded)
@@ -168,11 +177,17 @@ impl SharedCache {
             // An unreferenced version can remain after a crash before CURRENT was published.
             // Restore it afresh rather than trusting potentially incomplete local data.
             if version.exists() {
-                fs::remove_dir_all(&version)?;
+                fs::remove_dir_all(&version).at("Cannot remove shared version", &version)?;
             }
-            fs::rename(source, &version)?;
-            File::open(self.root.join("versions"))?.sync_all()?;
-            File::open(&pending)?.sync_all()?;
+            fs::rename(&source, &version).at("Cannot publish shared version", &version)?;
+            File::open(self.root.join("versions"))
+                .at("Cannot open shared path", &self.root.join("versions"))?
+                .sync_all()
+                .at("Cannot sync shared path", &self.root.join("versions"))?;
+            File::open(&pending)
+                .at("Cannot open shared path", &pending)?
+                .sync_all()
+                .at("Cannot sync shared path", &pending)?;
         }
         // Repair a missing current directory without changing the pointer.
         if pointer
@@ -186,58 +201,72 @@ impl SharedCache {
             current: id.to_owned(),
             previous: pointer.map(|pointer| pointer.current),
         };
-        let mut temp = tempfile::NamedTempFile::new_in(&self.root)?;
-        private_file(temp.as_file())?;
-        serde_json::to_writer(&mut temp, &pointer)
+        let bytes = serde_json::to_vec(&pointer)
             .map_err(|_| Error::new("Cannot encode shared CURRENT pointer"))?;
-        temp.flush()?;
-        temp.as_file().sync_all()?;
-        no_symlinks(&self.root.join("CURRENT"))?;
-        temp.persist(self.root.join("CURRENT"))
-            .map_err(|_| Error::new("Cannot publish shared CURRENT pointer"))?;
-        File::open(&self.root)?.sync_all()?;
+        write_private(&self.root.join("CURRENT"), &bytes)?;
         // The exclusive machine/hub lock stays held through every deletion. Readers
         // can hold a shared lock on operation.lock while using a version's files.
-        for entry in fs::read_dir(self.root.join("versions"))? {
-            let entry = entry?;
+        for entry in fs::read_dir(self.root.join("versions"))
+            .at("Cannot read shared directory", &self.root.join("versions"))?
+        {
+            let entry = entry.at(
+                "Cannot read shared cache entry",
+                &self.root.join("versions"),
+            )?;
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
             if name == pointer.current || pointer.previous.as_deref() == Some(name) {
                 continue;
             }
-            if snapshot_id(name) || name.starts_with(".staging-") {
+            if hex_digest(name) || name.starts_with(".staging-") {
                 no_symlinks(&entry.path())?;
-                fs::remove_dir_all(entry.path())?;
+                fs::remove_dir_all(entry.path())
+                    .at("Cannot remove shared cache entry", &entry.path())?;
             }
         }
         // No staging tree is live outside an exclusive cache section. In-flight
         // operations hold owned metadata and skip publication if CURRENT changed.
-        for entry in fs::read_dir(&pending)? {
-            let entry = entry?;
+        for entry in fs::read_dir(&pending).at("Cannot read shared directory", &pending)? {
+            let entry = entry.at("Cannot read shared cache entry", &pending)?;
             no_symlinks(&entry.path())?;
-            fs::remove_dir_all(entry.path())?;
+            fs::remove_dir_all(entry.path())
+                .at("Cannot remove shared cache entry", &entry.path())?;
         }
-        File::open(self.root.join("versions"))?.sync_all()?;
-        File::open(pending)?.sync_all()?;
+        File::open(self.root.join("versions"))
+            .at("Cannot open shared path", &self.root.join("versions"))?
+            .sync_all()
+            .at("Cannot sync shared path", &self.root.join("versions"))?;
+        File::open(&pending)
+            .at("Cannot open shared path", &pending)?
+            .sync_all()
+            .at("Cannot sync shared path", &pending)?;
         Ok(())
     }
 }
 
 fn sync_tree(path: &Path) -> Result<()> {
     no_symlinks(path)?;
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let kind = entry.file_type()?;
+    for entry in fs::read_dir(path).at("Cannot read shared directory", path)? {
+        let entry = entry.at("Cannot read shared cache entry", path)?;
+        let kind = entry
+            .file_type()
+            .at("Cannot inspect shared entry", &entry.path())?;
         if kind.is_dir() {
             sync_tree(&entry.path())?;
         } else if kind.is_file() {
-            File::open(entry.path())?.sync_all()?;
+            File::open(entry.path())
+                .at("Cannot open shared path", &entry.path())?
+                .sync_all()
+                .at("Cannot sync shared path", &entry.path())?;
         } else {
             return Err(Error::new(
                 "Imported symlinks and special files are not allowed",
             ));
         }
     }
-    File::open(path)?.sync_all()?;
+    File::open(path)
+        .at("Cannot open shared path", path)?
+        .sync_all()
+        .at("Cannot sync shared path", path)?;
     Ok(())
 }

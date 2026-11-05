@@ -599,6 +599,10 @@ fn exit_3_is_not_success_and_an_ambiguous_write_is_not_blindly_replayed() {
             let incomplete_history = fixture.ids(&fixture.alpha, "bot");
             assert!(incomplete_history.len() > old.len());
             fs::write(tool.join("mode"), "pass").unwrap();
+            failure(&fixture.cli(&fixture.alpha, &["prune"]));
+            assert_eq!(fixture.ids(&fixture.alpha, "bot"), incomplete_history);
+            // Inspect this injected incomplete run before allowing another write.
+            fs::remove_file(fixture.alpha.path("state").join("pending-backup.yaml")).unwrap();
             fixture.ok(&fixture.alpha, &["prune"]);
             assert_eq!(fixture.ids(&fixture.alpha, "bot"), incomplete_history);
         }
@@ -1642,7 +1646,9 @@ fn shared_cache_status_actions_keep_ready_as_configuration_readiness() {
             .iter()
             .any(|item| {
                 let message = item.as_str().unwrap().to_lowercase();
-                message.contains("sync") && message.contains("accepted shared head")
+                message.contains("sync")
+                    && message.contains("accepted shared head")
+                    && message.contains("back up")
             })
     );
     // Cache repair is required even when the existing schedule is not due yet.
@@ -3301,7 +3307,7 @@ fn registry_owner_control_missing_prior_shared_master_still_blocks_publication()
 }
 
 #[test]
-fn final_fix_prior_shared_identifiers_are_refused_without_delivered_passwords() {
+fn prior_shared_identifiers_are_refused_without_delivered_passwords() {
     let mut violations = Vec::new();
     for field in ["password_ref", "password_env"] {
         let (mut fixture, beta, mut gamma) = registry_privacy_transition_fixture(false);
@@ -3332,7 +3338,7 @@ fn final_fix_prior_shared_identifiers_are_refused_without_delivered_passwords() 
 }
 
 #[test]
-fn final_fix_pending_historical_shared_url_and_reference_reuse_is_refused() {
+fn pending_historical_shared_url_and_reference_reuse_is_refused() {
     let mut violations = Vec::new();
     for field in ["url", "password_ref"] {
         let (fixture, beta, mut gamma) = registry_privacy_transition_fixture(false);
@@ -3367,7 +3373,7 @@ fn final_fix_pending_historical_shared_url_and_reference_reuse_is_refused() {
 }
 
 #[test]
-fn final_fix_explicit_excluded_includes_fail_before_repository_initialization() {
+fn explicit_excluded_includes_fail_before_repository_initialization() {
     let mut violations = Vec::new();
     for (include, exclude) in [
         ("notes/auth.md", vec![]),
@@ -3414,7 +3420,7 @@ fn final_fix_explicit_excluded_includes_fail_before_repository_initialization() 
 }
 
 #[test]
-fn final_fix_recursive_exclusions_are_named_safely_and_never_published() {
+fn recursive_exclusions_are_named_safely_and_never_published() {
     let mut missing = Vec::new();
     for shared in [false, true] {
         let mut fixture = Fixture::new();
@@ -3528,7 +3534,7 @@ fn final_fix_recursive_exclusions_are_named_safely_and_never_published() {
 }
 
 #[test]
-fn final_fix_status_reads_last_atomic_state_while_operation_lock_is_held() {
+fn status_reads_last_atomic_state_while_operation_lock_is_held() {
     let fixture = Fixture::new();
     let root = fixture.alpha.path("state");
     fs::create_dir(&root).unwrap();
@@ -3626,7 +3632,7 @@ fn status_rejects_unrepresentable_times_without_writing_state() {
 }
 
 #[test]
-fn final_fix_status_does_not_create_locks_or_change_directory_permissions() {
+fn status_does_not_create_locks_or_change_directory_permissions() {
     let fixture = Fixture::new();
     let root = fixture.alpha.path("state");
     let absent = fixture.status(&fixture.alpha);
@@ -3643,7 +3649,7 @@ fn final_fix_status_does_not_create_locks_or_change_directory_permissions() {
 }
 
 #[test]
-fn final_fix_control_status_rejects_malformed_state_and_symlinked_paths() {
+fn control_status_rejects_malformed_state_and_symlinked_paths() {
     let fixture = Fixture::new();
     let root = fixture.alpha.path("state");
     write(root.join("status.json"), b"{");
@@ -3714,7 +3720,7 @@ fn legacy_incomplete_shared(fixture: &Fixture) -> Value {
 }
 
 #[test]
-fn final_fix_first_incomplete_legacy_setup_can_retry_without_losing_history() {
+fn first_incomplete_legacy_setup_can_retry_without_losing_history() {
     let mut fixture = Fixture::new();
     let tool = Fixture::wrapper(&mut fixture.alpha);
     let incomplete = legacy_incomplete_shared(&fixture);
@@ -3759,7 +3765,7 @@ fn final_fix_first_incomplete_legacy_setup_can_retry_without_losing_history() {
 }
 
 #[test]
-fn final_fix_control_initial_setup_refuses_any_foreign_or_uncertain_history() {
+fn control_initial_setup_refuses_any_foreign_or_uncertain_history() {
     for case in [
         "foreign-bot",
         "superseded-runtime",
@@ -3872,23 +3878,23 @@ fn assert_restic_lock_wait(sync: Option<Value>, expected: &str) {
 }
 
 #[test]
-fn final_fix_control_explicit_zero_lock_wait_reaches_restic() {
+fn control_explicit_zero_lock_wait_reaches_restic() {
     assert_restic_lock_wait(Some(json!({"retry_lock_seconds": 0})), "0s");
 }
 
 #[test]
-fn final_fix_default_lock_wait_reaches_restic_as_120_seconds() {
+fn default_lock_wait_reaches_restic_as_120_seconds() {
     assert_restic_lock_wait(None, "120s");
 }
 
 #[test]
-fn final_fix_public_template_lock_wait_reaches_restic_as_120_seconds() {
+fn public_template_lock_wait_reaches_restic_as_120_seconds() {
     let defaults: Value = serde_saphyr::from_str(include_str!("../config.yaml")).unwrap();
     assert_restic_lock_wait(Some(defaults["sync"].clone()), "120s");
 }
 
 #[test]
-fn final_fix_control_due_scheduled_sync_advances_without_moving_the_anchor() {
+fn control_due_scheduled_sync_advances_without_moving_the_anchor() {
     let fixture = Fixture::new();
     fixture.ok(&fixture.alpha, &["setup"]);
     let file = fixture.alpha.path("state").join("status.json");

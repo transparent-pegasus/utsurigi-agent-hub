@@ -8,6 +8,10 @@ mod migration;
 mod operations;
 mod registry;
 mod restic;
+mod retention;
+mod schedule;
+#[cfg(test)]
+mod schedule_retention_tests;
 mod selection;
 mod shared;
 mod state;
@@ -43,6 +47,9 @@ enum Action {
         bot_id: String,
         #[arg(long)]
         destination: PathBuf,
+        /// Explicitly inspect a complete snapshot whose Bot identity differs from the registry.
+        #[arg(long)]
+        allow_identity_mismatch: bool,
     },
     Restore {
         #[arg(long, value_enum)]
