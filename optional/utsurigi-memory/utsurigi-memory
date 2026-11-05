@@ -1,0 +1,7 @@
+#!/bin/bash
+# Entry point: bash utsurigi-memory <command>. Build the installed binary if missing.
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+BIN="$HOME/.local/bin/utsurigi-memory"
+[ -x "$BIN" ] || bash "$HERE/build.sh" >&2 || exit 1
+exec "$BIN" "$@"

@@ -43,10 +43,10 @@ jobs:
       - name: Check optional utsurigi-memory
         run: |
           python3 .github/scripts/check-utsurigi-memory.py --self-test
+          python3 .github/scripts/package-utsurigi-memory.py --check
           python3 .github/scripts/check-utsurigi-memory.py optional/utsurigi-memory.zip
-          unzip -q optional/utsurigi-memory.zip -d "$RUNNER_TEMP/utsurigi-memory"
-          bash -n "$RUNNER_TEMP/utsurigi-memory/utsurigi-memory/build.sh"
-          bash -n "$RUNNER_TEMP/utsurigi-memory/utsurigi-memory/utsurigi-memory"
+          bash -n optional/utsurigi-memory/build.sh
+          bash -n optional/utsurigi-memory/utsurigi-memory
           curl -fsSL https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-1.24.2.tgz -o "$RUNNER_TEMP/onnxruntime.tgz"
           echo "43725474ba5663642e17684717946693850e2005efbd724ac72da278fead25e6  $RUNNER_TEMP/onnxruntime.tgz" | sha256sum --check
           tar -xzf "$RUNNER_TEMP/onnxruntime.tgz" -C "$RUNNER_TEMP"
@@ -54,7 +54,7 @@ jobs:
           export ORT_PREFER_DYNAMIC_LINK=1
           export RUSTFLAGS="-C link-arg=-Wl,-rpath,$ORT_LIB_PATH"
           export CARGO_TARGET_DIR="$RUNNER_TEMP/utsurigi-memory-target"
-          cd "$RUNNER_TEMP/utsurigi-memory/utsurigi-memory"
+          cd optional/utsurigi-memory
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked

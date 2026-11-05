@@ -6,6 +6,8 @@ import sys
 import zipfile
 
 
+REQUIRED = frozenset({"utsurigi-memory/Cargo.toml", "utsurigi-memory/Cargo.lock", "utsurigi-memory/src/main.rs", "utsurigi-memory/tests/cli.rs"})
+
 def check(data):
     failures = []
     seen = set()
@@ -54,7 +56,7 @@ def check(data):
                 if re.search(rb"/cursor/stores/|/(?:home|Users)/[^/\s\"']+|/root/|/mnt/|\b[^\s]+'s personal memory store", content):
                     reasons.add("personal deployment identifier")
             failures.extend(f"{name!r}: {reason}" for reason in sorted(reasons))
-    for name in sorted({"utsurigi-memory/Cargo.toml", "utsurigi-memory/Cargo.lock", "utsurigi-memory/src/main.rs", "utsurigi-memory/tests/cli.rs"} - files):
+    for name in sorted(REQUIRED - files):
         failures.append(f"missing required file: {name}")
     return failures
 
@@ -127,8 +129,11 @@ def self_test():
         ("utsurigi-memory/note.txt", b"Example's personal memory store", "personal deployment identifier"),
     ]
     missing = []
+    checked = 2  # Positive source and executable-script fixtures above.
 
     def require_reason(data, expected, case):
+        nonlocal checked
+        checked += 1
         actual = check(data)
         if expected not in actual:
             missing.append(f"{case}: expected {expected!r}, got {actual!r}")
@@ -139,16 +144,16 @@ def self_test():
         require_reason(fixture(("utsurigi-memory/link.txt", b"target"), mode), "'utsurigi-memory/link.txt': symlink or special file", mode)
     require_reason(fixture(("utsurigi-memory/app.txt", b"text"), stat.S_IFREG | 0o755), "'utsurigi-memory/app.txt': executable without script header", "executable")
     require_reason(fixture(("utsurigi-memory/src/main.rs/", b"")), "'utsurigi-memory/src/main.rs/': duplicate entry", "duplicate")
-    for name in ("utsurigi-memory/Cargo.toml", "utsurigi-memory/Cargo.lock", "utsurigi-memory/src/main.rs", "utsurigi-memory/tests/cli.rs"):
+    for name in sorted(REQUIRED):
         require_reason(fixture(omit=name), f"missing required file: {name}", "missing required file")
     empty = io.BytesIO()
     with zipfile.ZipFile(empty, "w"):
         pass
     for name in files:
-        if name in {"utsurigi-memory/Cargo.toml", "utsurigi-memory/Cargo.lock", "utsurigi-memory/src/main.rs", "utsurigi-memory/tests/cli.rs"}:
+        if name in REQUIRED:
             require_reason(empty.getvalue(), f"missing required file: {name}", "empty archive")
     assert not missing, "\n".join(missing)
-    print(f"archive checker self-tests: {len(rejected) + 14} passed")
+    print(f"archive checker self-tests: {checked} passed")
 
 
 if __name__ == "__main__":

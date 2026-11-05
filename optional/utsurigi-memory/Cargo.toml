@@ -1,0 +1,18 @@
+[package]
+name = "utsurigi-memory"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "utsurigi-memory"
+path = "src/main.rs"
+
+[dependencies]
+rusqlite = { version = "0.40", features = ["bundled"] }
+fastembed = { version = "7", default-features = false, features = ["ort-download-binaries-rustls-tls"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[profile.release]
+opt-level = 3
