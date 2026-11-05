@@ -36,12 +36,9 @@ repositories:
     password_env: null
 paths:
   owned: null
-  shared: null # Owner's authoring tree; imports never replace it.
+  shared: null # Local authoring tree; imports never replace it.
   imports: null # Same absolute root for all authorized Bots in one hub+machine.
-  # Managed root: paths.imports/<SHA-256(hub)>/; versions/<full snapshotID>/.
-  # Atomic CURRENT JSON: hub/current/previous; reuse matching snapshot IDs.
-  # Long reads: shared flock on that root's operation.lock, then reread status.active_shared.
-  # Hold through reads; updates/GC take the exclusive lock and keep current/previous.
+  # Shared cache layout and reader locks: OPS.md#publish-and-consume.
   state: null # Per-Bot state and locks; never share this root across Bots.
 data:
   include: [] # Explicit paths relative to owned.

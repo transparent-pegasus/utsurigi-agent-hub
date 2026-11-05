@@ -5,6 +5,9 @@ pub struct Version {
     pub completed_at: Option<i64>,
 }
 
+// A predecessor expires only after its unique completed successor has aged.
+// Tied completion times, duplicate IDs, incomplete versions and the newest
+// version stay available for recovery.
 pub fn expired(versions: &[Version], now: i64, retention_seconds: u64) -> Vec<String> {
     let mut completed: BTreeMap<i64, Vec<&Version>> = BTreeMap::new();
     let mut occurrences = BTreeMap::new();

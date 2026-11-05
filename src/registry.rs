@@ -1,5 +1,5 @@
 use crate::config::{Config, Repository, identity, parse_yaml, password_env_name};
-use crate::error::{Error, Result};
+use crate::error::{Error, IoContext, Result};
 use crate::restic::{Restic, password};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -73,7 +73,9 @@ impl Entry {
 
 impl LegacyRegistry {
     pub fn load(root: &Path, config: &Config) -> Result<Self> {
-        let registry: Self = parse_yaml(&registry_bytes(root)?, "Invalid legacy registry schema")?;
+        let mut registry: Self =
+            parse_yaml(&registry_bytes(root)?, "Invalid legacy registry schema")?;
+        normalize_references(&mut registry.bots);
         if registry.version != 1
             || !registry.bots.iter().any(|entry| {
                 entry.id == registry.owner.bot_id && entry.runtime_id == registry.owner.runtime_id
@@ -102,12 +104,21 @@ impl LegacyRegistry {
 fn registry_bytes(root: &Path) -> Result<Vec<u8>> {
     let path = root.join("registry.yaml");
     crate::config::no_symlinks(&path)?;
-    fs::read(path).map_err(|_| Error::new("A complete shared registry is required"))
+    fs::read(&path).at("A complete shared registry is required at", &path)
+}
+
+fn normalize_references(entries: &mut [Entry]) {
+    for entry in entries {
+        if entry.password_ref.as_deref() == Some("") {
+            entry.password_ref = None;
+        }
+    }
 }
 
 impl Registry {
     pub fn load(root: &Path, config: &Config) -> Result<Self> {
-        let registry: Self = parse_yaml(&registry_bytes(root)?, "Invalid registry v2 schema")?;
+        let mut registry: Self = parse_yaml(&registry_bytes(root)?, "Invalid registry v2 schema")?;
+        normalize_references(&mut registry.bots);
         registry.validate(config)?;
         Ok(registry)
     }
@@ -257,7 +268,6 @@ impl Registry {
                     || repository
                         .password_ref
                         .as_ref()
-                        .filter(|reference| !reference.is_empty())
                         .is_some_and(|reference| Some(reference) == other.password_ref.as_ref())
                 {
                     return Err(Error::new(
@@ -294,11 +304,10 @@ impl Registry {
                 ));
             }
             for old in previous.bots.iter().filter(|old| old.shared) {
-                if (!old.password_env.is_empty() && old.password_env == entry.password_env)
+                if old.password_env == entry.password_env
                     || old
                         .password_ref
                         .as_ref()
-                        .filter(|reference| !reference.is_empty())
                         .is_some_and(|reference| Some(reference) == entry.password_ref.as_ref())
                 {
                     return Err(Error::new(

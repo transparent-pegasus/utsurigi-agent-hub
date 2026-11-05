@@ -1,6 +1,10 @@
 ---
 description: Agent contract; read linked guides only on demand.
-when: "Always. INIT.md: no YAML, ready=false, setup/join/add Bot/hub; OPS.md: sync/backup/share/include/exclude/schedule/cleanup; RECOVERY.md: nonzero exit/restore/move/handover/retire/rotate."
+when: >-
+  Always. INIT.md: no YAML, ready=false, setup/join/add Bot/hub.
+  OPS.md: sync/backup/share/include/exclude/schedule/cleanup.
+  RECOVERY.md: nonzero exit/restore/move/handover/retire/rotate,
+  locks/wrong passwords/interrupted setup.
 ---
 # Agent contract
 

@@ -31,11 +31,23 @@ password error does not prove an earlier write failed. Authentication,
 configuration, and integrity failures need correction. Consult
 [practices](knowledge/practices.md) for transport retry policy.
 
+## Reconcile a backup
+
+If `paths.state/pending-backup.yaml` exists, inspect its repository and `run` value
+using the securely configured restic binary. Check for incomplete snapshots and
+completion tags for Bot backups. For shared-v2 publication, compare the recorded run
+with the accepted CAS head and verify the intended data; an unaccepted candidate
+is never current authority. Preserve prior successful versions.
+After reconciling that run and resolving its failure, remove only this record to
+permit the next write. Do not blindly remove it to resume a schedule. Restore and
+peer pull remain available for inspection while writes are held.
+
 ## Shared-cache migration
 
 The new CLI does not treat a Bot's old random `status.active_shared` (`shared-*`)
 path as authoritative. With an initialized schedule and no current cache, run
-`sync` to migrate; an uninitialized schedule requires `setup`.
+`sync` to import the cache and back up the selected Bot data; an uninitialized
+schedule requires `setup`.
 Old `shared-*` directories are not deleted automatically. Before cleaning them up,
 stop old runtimes/readers, verify the new `status.active_shared` references, and
 identify each cache as an old CLI artifact. Remove only those identified caches;
@@ -86,6 +98,8 @@ Unrecognized snapshot metadata or a snapshot from another hub blocks operations 
 repository, including restore by a valid ID, until it is reconciled with
 restic.
 
+### Inspect a snapshot
+
 Obtain snapshot IDs with the configured or setup-acquired restic binary, which
 may be at `paths.state/bin/restic-<encryption.version>` rather than on PATH.
 Invoke it with `--repo SELECTED_REPOSITORY_URL snapshots --json`, choosing the
@@ -94,7 +108,9 @@ password as `RESTIC_PASSWORD` and storage credentials; R2 also needs
 `-o s3.region=auto`. Use a returned `id` with `restore`, choosing
 `--repository shared` or `--repository bot`, plus
 `--snapshot ID --destination NEW_DIRECTORY`. Restore into a fresh directory and
-inspect it before adopting data.
+inspect it before adopting data. Restore accepts same-hub incomplete and
+historical publisher snapshots for inspection; it does not make them current authority.
+Its plaintext staging directory is created with mode 0700.
 
 Run `restic --repo SELECTED_REPOSITORY_URL check` with the same binary, secure
 delivery, and R2 option before accepting recovery. Coordinate a shared-repository

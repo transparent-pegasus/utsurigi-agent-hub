@@ -148,6 +148,8 @@ time, retention, retry, transport, timeout, bandwidth, concurrency),
 `budget.max_bots`, `budget.storage_target_gb`, `secrets.confirm_each_access`,
 `memory.enabled` (default: `false`), `skills.caveman.source`, or `review.reviewer_bot`.
 
+### Hub and existing resources
+
 Check existing same-owner authorized configurations and durable secret/repository
 references. Reuse the approved hub; if unsettled, select an existing authorized hub
 or create and name one with the user before initializing storage.
@@ -183,10 +185,10 @@ For each hub+machine, configure the same absolute `paths.imports` root in every
 Bot YAML. Investigate the environment's sharing facilities and permissions first;
 choose an authorized common folder or native knowledge facility. No Bot-specific
 layout is required. Use distinct roots for different hubs or machines.
-The managed cache root is `paths.imports/<SHA-256(hub)>/`. It holds stable
-`versions/<snapshotID>/` directories using full restic IDs, JSON `CURRENT`
-(`hub`, `current`, `previous`), and `operation.lock`.
-See [operations](OPS.md) for atomic switching, reader locks, reuse, and retention.
+Read [OPS](OPS.md#publish-and-consume) before consuming shared files; it defines
+cache layout, atomic switching, reader locks, and retention.
+
+### Paths and storage
 
 Read [config.yaml](config.yaml), then write each Bot's private YAML outside
 checkouts or under ignored `.utsurigi-agent-hub/<hub>/<bot-id>/config.yaml`.
@@ -410,6 +412,8 @@ knowledge has another.
 Use the configured `budget.max_bots` when initializing the shared limit.
 For an existing hub, `setup` imports the current registry and registers the joining
 Bot automatically. It preserves shared knowledge and migrates v1 hubs automatically.
+
+### Confirm and initialize
 
 **Confirm once.** At the end of the dialogue, show ASK answers and INFER results
 in one concise list and get one confirmation. Include the current

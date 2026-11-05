@@ -375,6 +375,8 @@ fn failed_upload_preserves_current_and_retry_reuses_complete_unpublished_restore
     assert_eq!(fixture.active_shared(&beta), first);
     assert_eq!(fixture.status(&beta), before);
     fs::write(tool.join("mode"), "pass").unwrap();
+    assert!(fixture.ids(&beta, "bot").is_empty());
+    fs::remove_file(beta.path("state").join("pending-backup.yaml")).unwrap();
     fixture.ok(&beta, &["sync"]);
     assert_ne!(fixture.active_shared(&beta), first);
     assert_eq!(

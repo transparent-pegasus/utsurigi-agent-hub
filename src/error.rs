@@ -15,8 +15,18 @@ impl Error {
 }
 
 impl From<std::io::Error> for Error {
-    fn from(_: std::io::Error) -> Self {
-        Self::new("Local filesystem operation failed")
+    fn from(error: std::io::Error) -> Self {
+        Self::new(format!("Local filesystem operation failed: {error}"))
+    }
+}
+
+pub trait IoContext<T> {
+    fn at(self, operation: &str, path: &std::path::Path) -> Result<T>;
+}
+
+impl<T> IoContext<T> for std::io::Result<T> {
+    fn at(self, operation: &str, path: &std::path::Path) -> Result<T> {
+        self.map_err(|error| Error::new(format!("{operation} {}: {error}", path.display())))
     }
 }
 

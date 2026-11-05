@@ -1,5 +1,5 @@
 use crate::config::{CHILD_ENV, Config, RESTIC_TLS_ENV, Repository};
-use crate::error::{Error, Result};
+use crate::error::{Error, IoContext, Result};
 use crate::selection::{Export, validate_import};
 use crate::state::{private_dir, private_file};
 use serde::Deserialize;
@@ -16,6 +16,12 @@ pub struct Restic<'a> {
     cache: PathBuf,
     temp: PathBuf,
     inherited_shared_password: Option<OsString>,
+}
+
+pub enum BackupGuard {
+    // Ownerless setup reconciles durable migration fences and CAS candidates on retry.
+    InitialSetup,
+    Persistent,
 }
 
 #[derive(Deserialize)]
@@ -54,7 +60,7 @@ fn backup_snapshot_id(bytes: &[u8]) -> Result<String> {
                 id = Some(
                     message
                         .snapshot_id
-                        .filter(|id| snapshot_id(id))
+                        .filter(|id| hex_digest(id))
                         .ok_or_else(invalid)?,
                 );
             }
@@ -66,27 +72,26 @@ fn backup_snapshot_id(bytes: &[u8]) -> Result<String> {
 }
 
 impl Snapshot {
+    pub fn tag(&self, prefix: &str) -> Option<&str> {
+        let mut values = self.tags.iter().filter_map(|tag| tag.strip_prefix(prefix));
+        let value = values.next()?;
+        values.next().is_none().then_some(value)
+    }
+
     pub fn completed_at(&self) -> Option<i64> {
-        let mut markers = self
-            .tags
-            .iter()
-            .filter_map(|s| s.strip_prefix("completed:"));
-        let time = markers.next()?.parse().ok()?;
-        if markers.next().is_some() {
-            return None;
-        }
-        Some(time)
+        self.tag("completed:")?.parse().ok()
     }
 
     pub fn kind(&self, kind: &str) -> bool {
-        self.tags.iter().any(|s| s == "utsurigi-agent-hub")
-            && self.tags.iter().any(|s| s == &format!("kind:{kind}"))
+        self.tags.iter().any(|s| s == "utsurigi-agent-hub") && self.tag("kind:") == Some(kind)
     }
 
     pub fn owned_by(&self, id: &str, kind: &str) -> bool {
-        self.kind(kind)
-            && self.hostname == id
-            && self.tags.iter().any(|s| s == &format!("bot:{id}"))
+        self.kind(kind) && self.hostname == id && self.tag("bot:") == Some(id)
+    }
+
+    pub fn matches_identity(&self, id: &str, runtime: &str, kind: &str) -> bool {
+        self.owned_by(id, kind) && self.tag("runtime:") == Some(runtime)
     }
 }
 
@@ -506,7 +511,7 @@ impl<'a> Restic<'a> {
         )?;
         let snapshots: Vec<Snapshot> = serde_json::from_slice(&bytes)
             .map_err(|_| Error::new("Invalid restic snapshot response"))?;
-        if snapshots.iter().any(|s| !snapshot_id(&s.id)) {
+        if snapshots.iter().any(|s| !hex_digest(&s.id)) {
             return Err(Error::new("Invalid restic snapshot identifier"));
         }
         Ok(snapshots)
@@ -515,11 +520,7 @@ impl<'a> Restic<'a> {
     pub fn snapshots(&self, repository: &Repository) -> Result<Vec<Snapshot>> {
         let snapshots = self.raw_snapshots(repository)?;
         for snapshot in &snapshots {
-            let legacy_hub = snapshot
-                .tags
-                .iter()
-                .filter_map(|tag| tag.strip_prefix("hub:"))
-                .eq([self.config.hub.as_str()]);
+            let legacy_hub = snapshot.tag("hub:") == Some(self.config.hub.as_str());
             let control = snapshot.tags.iter().any(|tag| tag.starts_with("uah2:"));
             if control && repository.url == self.config.repositories.shared.url {
                 crate::migration::read_control(self.config, self, snapshot)?;
@@ -531,7 +532,7 @@ impl<'a> Restic<'a> {
     }
 
     pub(crate) fn snapshot(&self, repository: &Repository, id: &str) -> Result<Snapshot> {
-        if !snapshot_id(id) {
+        if !hex_digest(id) {
             return Err(Error::new("Expected a full snapshot identifier"));
         }
         let bytes = self.run(
@@ -592,6 +593,7 @@ impl<'a> Restic<'a> {
         repository: &Repository,
         export: &Export,
         kind: &str,
+        guard: BackupGuard,
     ) -> Result<String> {
         if !crate::config::identity(kind) || matches!(kind, "shared" | "bot") {
             return Err(Error::new(
@@ -636,6 +638,9 @@ impl<'a> Restic<'a> {
             arguments.extend(["--tag".into(), tag.into()]);
         }
         arguments.push(".".into());
+        if matches!(guard, BackupGuard::Persistent) {
+            crate::state::begin_backup(self.config, repository, export, kind)?;
+        }
         let bytes = self.run(repository, &arguments, Some(export.tree.path()))?;
         let id = backup_snapshot_id(&bytes)?;
         if existing
@@ -676,23 +681,21 @@ impl<'a> Restic<'a> {
         value
             .get("id")
             .and_then(|v| v.as_str())
-            .filter(|s| snapshot_id(s))
+            .filter(|s| hex_digest(s))
             .map(str::to_owned)
             .ok_or_else(|| Error::new("Invalid restic repository identity"))
     }
 
-    pub fn backup(&self, repository: &Repository, export: &Export, kind: &str) -> Result<()> {
+    pub fn backup(
+        &self,
+        repository: &Repository,
+        export: &Export,
+        kind: &str,
+        guard: BackupGuard,
+    ) -> Result<()> {
         // Reconcile existing snapshots first; never retry an ambiguous whole write.
         let existing = self.snapshots(repository)?;
-        let run_tag = format!(
-            "run:{}",
-            export
-                .tree
-                .path()
-                .file_name()
-                .expect("temporary directory")
-                .to_string_lossy()
-        );
+        let run_tag = format!("run:{}", export.run_id());
         if existing
             .iter()
             .any(|snapshot| snapshot.tags.contains(&run_tag))
@@ -721,6 +724,10 @@ impl<'a> Restic<'a> {
             arguments.push(tag.into());
         }
         arguments.push(".".into());
+        // Failed read-only preflight does not create an uncertain write attempt.
+        if matches!(guard, BackupGuard::Persistent) {
+            crate::state::begin_backup(self.config, repository, export, kind)?;
+        }
         let output = self.run(repository, &arguments, Some(export.tree.path()))?;
         let id = backup_snapshot_id(&output)?;
         if existing
@@ -754,13 +761,9 @@ impl<'a> Restic<'a> {
         ];
         let matches_write = |snapshot: &Snapshot| {
             snapshot.owned_by(self.config.id(), kind)
-                && expected.iter().all(|(prefix, value)| {
-                    snapshot
-                        .tags
-                        .iter()
-                        .filter_map(|tag| tag.strip_prefix(prefix))
-                        .eq([*value])
-                })
+                && expected
+                    .iter()
+                    .all(|(prefix, value)| snapshot.tag(prefix) == Some(*value))
         };
         if !matches_write(&snapshot)
             || snapshot
@@ -797,7 +800,7 @@ impl<'a> Restic<'a> {
     }
 
     pub fn restore(&self, repository: &Repository, id: &str, destination: &Path) -> Result<()> {
-        if !snapshot_id(id) {
+        if !hex_digest(id) {
             return Err(Error::new("Restore requires an explicit full snapshot ID"));
         }
         self.run(
@@ -815,7 +818,7 @@ impl<'a> Restic<'a> {
     }
 }
 
-pub fn snapshot_id(value: &str) -> bool {
+pub fn hex_digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|c| c.is_ascii_hexdigit())
 }
 
@@ -896,10 +899,13 @@ fn acquire_official(target: &Path, version: &str) -> Result<()> {
     }
     let asset = format!("restic_{version}_{os}_{architecture}.bz2");
     let base = format!("https://github.com/restic/restic/releases/download/v{version}");
-    let checksums = tempfile::NamedTempFile::new_in(parent)?;
-    let archive = tempfile::NamedTempFile::new_in(parent)?;
+    let checksums =
+        tempfile::NamedTempFile::new_in(parent).at("Cannot stage restic download in", parent)?;
+    let archive =
+        tempfile::NamedTempFile::new_in(parent).at("Cannot stage restic download in", parent)?;
     download(&format!("{base}/SHA256SUMS"), checksums.path(), 1024 * 1024)?;
-    let sums = fs::read_to_string(checksums.path())?;
+    let sums =
+        fs::read_to_string(checksums.path()).at("Cannot read checksums", checksums.path())?;
     let expected = sums
         .lines()
         .find_map(|line| {
@@ -907,7 +913,7 @@ fn acquire_official(target: &Path, version: &str) -> Result<()> {
             let digest = fields.next()?;
             (fields.next()? == asset).then_some(digest)
         })
-        .filter(|s| s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit()))
+        .filter(|s| hex_digest(s))
         .ok_or_else(|| Error::new("Official checksum does not cover this restic asset"))?;
     download(
         &format!("{base}/{asset}"),
@@ -915,43 +921,48 @@ fn acquire_official(target: &Path, version: &str) -> Result<()> {
         128 * 1024 * 1024,
     )?;
     let mut hash = Sha256::new();
-    let mut file = File::open(archive.path())?;
-    let mut buffer = [0; 65536];
-    loop {
-        let count = file.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hash.update(&buffer[..count]);
-    }
+    let mut file = File::open(archive.path()).at("Cannot read archive", archive.path())?;
+    std::io::copy(&mut file, &mut hash).at("Cannot hash archive", archive.path())?;
     if format!("{:x}", hash.finalize()) != expected.to_ascii_lowercase() {
         return Err(Error::new(
             "Official restic checksum mismatch; no executable was installed",
         ));
     }
-    let mut executable = tempfile::NamedTempFile::new_in(parent)?;
-    private_file(executable.as_file())?;
-    let mut decoder =
-        bzip2::read::BzDecoder::new(File::open(archive.path())?).take(256 * 1024 * 1024 + 1);
-    let size = std::io::copy(&mut decoder, &mut executable)?;
+    let mut executable =
+        tempfile::NamedTempFile::new_in(parent).at("Cannot stage restic download in", parent)?;
+    private_file(executable.as_file(), executable.path())?;
+    let mut decoder = bzip2::read::BzDecoder::new(
+        File::open(archive.path()).at("Cannot read archive", archive.path())?,
+    )
+    .take(256 * 1024 * 1024 + 1);
+    let size =
+        std::io::copy(&mut decoder, &mut executable).at("Cannot unpack restic in", parent)?;
     if size > 256 * 1024 * 1024 {
         return Err(Error::new("Restic executable exceeds acquisition limit"));
     }
-    executable.flush()?;
-    executable.as_file().sync_all()?;
+    executable.flush().at("Cannot flush restic in", parent)?;
+    executable
+        .as_file()
+        .sync_all()
+        .at("Cannot sync restic in", parent)?;
     let path = executable.into_temp_path();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+            .at("Cannot protect restic", &path)?;
     }
     if !compatible(&path, version) {
         return Err(Error::new(
             "Downloaded restic did not match its pinned version",
         ));
     }
-    path.persist_noclobber(target).map_err(|_| {
-        Error::new("Cannot install verified restic without replacing an existing file")
+    path.persist_noclobber(target).map_err(|error| {
+        Error::new(format!(
+            "Cannot install verified restic without replacing an existing file: {}: {}",
+            target.display(),
+            error.error
+        ))
     })?;
     Ok(())
 }

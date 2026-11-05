@@ -44,15 +44,8 @@ owner-only `0600` `.env` beside the selected config; existing process variables 
 Setup passes only after `restic check`, a restore compared byte for byte with the
 captured backup source, and verified remote retrieval when the Bot handles transfer.
 
-Investigate each environment's file-sharing facilities. Give authorized Bots in
-one hub+machine the same `paths.imports` root. Shared knowledge uses stable
-`versions/<snapshotID>/` names under `paths.imports/<SHA-256(hub)>/`, reuses matching
-snapshot IDs, and switches JSON `CURRENT` atomically. Keep current and previous
-versions; long reads follow the [reader lock protocol](OPS.md#publish-and-consume).
-Choose the location for the environment; no Bot-specific layout is required.
-
-Restic deduplicates data. Small SQLite changes may upload the entire database;
-per-record incremental transfer and fixed sync latency are not guaranteed.
+Give Bots in one hub+machine the same `paths.imports` root. See
+[OPS](OPS.md#publish-and-consume) for the cache layout, reader locks, and sync behavior.
 
 ## Requirements
 

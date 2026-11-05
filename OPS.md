@@ -8,7 +8,7 @@ Run commands with `--config <bot YAML>`; inspect `status` JSON first.
 `ready` means configuration fields are complete, not remote health or successful
 setup. `joined` reports completed setup/own sync. `failure` reports an unresolved
 operation failure, or `null`; follow its reason and the `remediation` strings.
-`next_action` names the operation to address, `configure`, or `wait`.
+`next_action` names the operation to address, `configure`, `reconcile`, or `wait`.
 `remediation` is an array of strings; timestamps describe local operations.
 `anchor`, `last_success`, and `next_due` in status JSON are RFC3339 strings with
 seconds in UTC (`YYYY-MM-DDTHH:MM:SSZ`), or `null` when unset. Persisted schedule
@@ -27,6 +27,9 @@ target repository's credentials can pull proposals; otherwise route them through
 the user. Consume only the verified
 absolute version path in `status.active_shared`, never staging or an incomplete
 import. Fetch peer data on demand with `pull BOT_ID --destination NEW_DIRECTORY`.
+If the latest complete peer snapshot's Bot/runtime/kind differs from the registry,
+pull stops with an error. Use `--allow-identity-mismatch` only on an explicit user
+instruction to inspect that version. Hub checks and destination validation still apply.
 
 All Bots in one hub+machine use the same `paths.imports` root. The managed root is
 `paths.imports/<SHA-256(hub)>/`. It contains `versions/<snapshotID>/`, JSON `CURRENT`
@@ -47,6 +50,8 @@ verification, switching, and garbage collection) need the exclusive lock and wai
 up to 30 seconds. The CLI releases the cache lock before Bot-data upload or
 unrelated work. Lock errors name the affected lock path.
 
+This cache-importing sync also backs up the selected Bot data.
+
 ## Sync and schedule
 
 With `joined: true`, an initialized schedule without a current shared cache gives
@@ -58,6 +63,9 @@ The initial local-time anchor advances by fixed seconds, including across DST.
 A successful scheduled sync advances the due time; manual sync keeps it. On
 nonzero results, suspend automatic retries; inspect and reconcile before
 resuming. A failed sync keeps its due time and does not authorize another write.
+Before sync/publication writes, the CLI saves `paths.state/pending-backup.yaml`.
+It clears this record only after remote verification and local publication succeed.
+While it exists, setup/sync/publication/prune stop; follow [reconciliation](RECOVERY.md#reconcile-a-backup).
 `sync.retry_lock_seconds` bounds restic lock waiting (default 120 seconds; zero
 disables waiting), not whole-operation retry. A peer reader can delay completion
 marking up to that bound.
@@ -95,7 +103,7 @@ Built-in rules match every path component case-insensitively:
   `cookies`, `.cache`, `__pycache__`, `node_modules`, `models`, `.models`,
   `model_weights`, `weights`, `index`, `indexes`, `.indexes`, `generated_index`,
   `generated_indexes`, `generated-index`, `index_cache`, `hnsw_index`, `indices`,
-  `vector_index`, `vector-index`, `chroma`, `.chroma`, `.lancedb`, `logs`, `.env`,
+  `vector_index`, `vector-index`, `chroma`, `.chroma`, `.lancedb`, `logs`,
   `model.bin`, `weights.bin`.
 - Prefixes: `.env.`, `credentials.`, `secrets.`, `.secrets.`, `auth.`,
   `auth_state.`, `auth-state.`, `token.`, `tokens.`, `cookies.`, `logs.`, `id_rsa`,

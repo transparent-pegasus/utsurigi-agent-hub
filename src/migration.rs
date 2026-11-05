@@ -8,7 +8,7 @@ use crate::config::{Config, identity};
 use crate::error::{Error, Result};
 use crate::history::History;
 use crate::registry::{LegacyRegistry, Registry};
-use crate::restic::{Restic, Snapshot, latest, password, snapshot_id};
+use crate::restic::{Restic, Snapshot, hex_digest, latest, password};
 use crate::selection::{self, Export};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
@@ -84,7 +84,7 @@ pub(crate) fn read_control(
 ) -> Result<Fence> {
     let invalid = || Error::new("Invalid or incompatible migration format fence");
     let tags = control_tags(&config.hub);
-    if !snapshot_id(&snapshot.id)
+    if !hex_digest(&snapshot.id)
         || snapshot.tags.len() != tags.len()
         || tags.iter().any(|tag| !snapshot.tags.contains(tag))
     {
@@ -105,8 +105,8 @@ pub(crate) fn read_control(
     }
     match (&payload.source, &payload.capture) {
         (Some(source), Some(capture))
-            if snapshot_id(source)
-                && snapshot_id(capture)
+            if hex_digest(source)
+                && hex_digest(capture)
                 && !source.eq_ignore_ascii_case(capture)
                 && !source.eq_ignore_ascii_case(&snapshot.id)
                 && !capture.eq_ignore_ascii_case(&snapshot.id) => {}
@@ -429,8 +429,8 @@ pub(crate) fn helper_command() -> Option<Result<()>> {
             .and_then(|value| value.into_string().ok())
             .filter(|value| {
                 value == "empty"
-                    || snapshot_id(value)
-                    || value.strip_prefix("incomplete:").is_some_and(snapshot_id)
+                    || hex_digest(value)
+                    || value.strip_prefix("incomplete:").is_some_and(hex_digest)
             })
             .ok_or_else(|| {
                 Error::new("Migration helper requires a full source ID or initial inventory")
@@ -475,7 +475,7 @@ fn capture_under_append_lock(
     restic: &Restic<'_>,
     expected: &str,
 ) -> Result<Fence> {
-    let expected_source = snapshot_id(expected).then_some(expected);
+    let expected_source = hex_digest(expected).then_some(expected);
     let snapshots = restic.snapshots(&config.repositories.shared)?;
     if let Some(fence) = existing_fence(config, restic, &snapshots, false)? {
         if fence.source.as_deref() != expected_source {
@@ -517,7 +517,12 @@ fn capture_under_append_lock(
     let (manifest, bytes) = tree_manifest(tree.path())?;
     budget::authorize(config, &repositories(config), bytes)?;
     let export = Export { tree, bytes };
-    let capture = restic.backup_uncommitted(&config.repositories.shared, &export, CAPTURE_KIND)?;
+    let capture = restic.backup_uncommitted(
+        &config.repositories.shared,
+        &export,
+        CAPTURE_KIND,
+        crate::restic::BackupGuard::InitialSetup,
+    )?;
     let verified = temporary(config, "capture-verify-")?;
     restic.restore(&config.repositories.shared, &capture, verified.path())?;
     if tree_manifest(verified.path())?.0 != manifest {

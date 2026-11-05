@@ -114,7 +114,7 @@ impl HeadStore {
                     return Ok(false);
                 }
                 let mut temporary = tempfile::NamedTempFile::new_in(root)?;
-                private_file(temporary.as_file())?;
+                private_file(temporary.as_file(), temporary.path())?;
                 serde_json::to_writer(&mut temporary, next)
                     .map_err(|_| Error::new("Cannot encode shared head"))?;
                 temporary.flush()?;
@@ -248,7 +248,7 @@ fn local_lock(root: &Path, timeout: Duration) -> Result<File> {
         .write(true)
         .open(&path)?;
     regular_file(&file)?;
-    private_file(&file)?;
+    private_file(&file, &path)?;
     let started = Instant::now();
     loop {
         match file.try_lock() {
@@ -416,7 +416,7 @@ fn request(
     let mut status = tempfile::NamedTempFile::new_in(directory.path())?;
     let mut upload = tempfile::NamedTempFile::new_in(directory.path())?;
     for file in [&response_body, &headers, &status, &upload] {
-        private_file(file.as_file())?;
+        private_file(file.as_file(), file.path())?;
     }
     let mut config = String::from(
         "silent\ngloboff\nsuppress-connect-headers\nproto = \"=https\"\nproto-redir = \"=https\"\nconnect-timeout = \"15\"\n",
