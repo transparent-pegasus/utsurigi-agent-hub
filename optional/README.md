@@ -17,10 +17,12 @@ separate native stores. Immutable model assets and common code may be reused;
 the memory CLI remains standalone. Separate private stores and model deployments.
 Let the initializing Bot check machine identity, access, and sharing before reuse.
 
-Extract into a new directory and read `utsurigi-memory/README.md` before running
-`bash utsurigi-memory/build.sh`. The package contains source, scripts, a dependency
-lockfile, and tokenizer/config assets with provenance. It contains no model
-weights, database, compiled executable, or ONNX Runtime library.
+Extract the ZIP into a new directory, or use the tracked
+[source package](utsurigi-memory/). Read its [README](utsurigi-memory/README.md)
+for build requirements, model/runtime acquisition, CLI commands, paths, and
+consistent SQLite snapshot/recovery procedures. The ZIP contains the same source,
+scripts, lockfile, and tokenizer/config assets; no model weights, database,
+compiled executable, or ONNX Runtime library.
 
 On Debian, install C++ build tools before building:
 
@@ -70,3 +72,7 @@ including when piped to `head`. This also applies to `list --json` and
 the current time. Use `--hash` only for hash databases; retain the selected
 embedding model for E5. Do not mix embedding spaces or replace an existing native
 store.
+
+After editing the source, regenerate the distribution with
+`python3 .github/scripts/package-utsurigi-memory.py` from the repository root.
+CI checks source/ZIP parity before testing the source package.

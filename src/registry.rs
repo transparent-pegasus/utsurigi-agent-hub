@@ -1,26 +1,35 @@
 use crate::config::{Config, Repository, identity, parse_yaml, password_env_name};
 use crate::error::{Error, Result};
 use crate::restic::{Restic, password};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Registry {
+    pub version: u32,
+    pub hub: String,
+    pub max_bots: usize,
+    pub bots: Vec<Entry>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyRegistry {
     pub version: u32,
     pub hub: String,
     pub owner: Owner,
     pub bots: Vec<Entry>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Owner {
     pub bot_id: String,
     pub runtime_id: String,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Entry {
     pub id: String,
@@ -32,6 +41,27 @@ pub struct Entry {
 }
 
 impl Entry {
+    fn current(config: &Config) -> Self {
+        Self {
+            id: config.id().to_owned(),
+            runtime_id: config.runtime_id().to_owned(),
+            repository: config
+                .repositories
+                .bot
+                .url
+                .clone()
+                .expect("runtime configuration"),
+            password_ref: config.repositories.bot.password_ref.clone(),
+            password_env: config
+                .repositories
+                .bot
+                .password_env
+                .clone()
+                .expect("runtime configuration"),
+            shared: config.sharing.bot_data,
+        }
+    }
+
     pub fn repository(&self) -> Repository {
         Repository {
             url: Some(self.repository.clone()),
@@ -41,25 +71,97 @@ impl Entry {
     }
 }
 
+impl LegacyRegistry {
+    pub fn load(root: &Path, config: &Config) -> Result<Self> {
+        let registry: Self = parse_yaml(&registry_bytes(root)?, "Invalid legacy registry schema")?;
+        if registry.version != 1
+            || !registry.bots.iter().any(|entry| {
+                entry.id == registry.owner.bot_id && entry.runtime_id == registry.owner.runtime_id
+            })
+        {
+            return Err(Error::new(
+                "Legacy registry owner must name a current Bot runtime",
+            ));
+        }
+        registry.convert(config)?.validate(config)?;
+        Ok(registry)
+    }
+
+    pub fn convert(&self, config: &Config) -> Result<Registry> {
+        let registry = Registry {
+            version: 2,
+            hub: self.hub.clone(),
+            max_bots: config.budget.max_bots,
+            bots: self.bots.clone(),
+        };
+        registry.validate(config)?;
+        Ok(registry)
+    }
+}
+
+fn registry_bytes(root: &Path) -> Result<Vec<u8>> {
+    let path = root.join("registry.yaml");
+    crate::config::no_symlinks(&path)?;
+    fs::read(path).map_err(|_| Error::new("A complete shared registry is required"))
+}
+
 impl Registry {
     pub fn load(root: &Path, config: &Config) -> Result<Self> {
+        let registry: Self = parse_yaml(&registry_bytes(root)?, "Invalid registry v2 schema")?;
+        registry.validate(config)?;
+        Ok(registry)
+    }
+
+    pub fn initial(root: &Path, config: &Config, legacy_retry: bool) -> Result<Self> {
         let path = root.join("registry.yaml");
         crate::config::no_symlinks(&path)?;
-        let bytes =
-            fs::read(path).map_err(|_| Error::new("A complete shared registry is required"))?;
-        let registry: Self = parse_yaml(&bytes, "Invalid registry schema")?;
-        if registry.hub != config.hub {
+        let mut registry = if !path.try_exists()? {
+            Self {
+                version: 2,
+                hub: config.hub.clone(),
+                max_bots: config.budget.max_bots,
+                bots: vec![Entry::current(config)],
+            }
+        } else {
+            let value: serde_json::Value =
+                parse_yaml(&registry_bytes(root)?, "Invalid registry schema")?;
+            if value["version"] == 1 {
+                let legacy = LegacyRegistry::load(root, config)?;
+                // An interrupted legacy initial backup binds its retry input to
+                // that source runtime. An empty repository has no prior publisher.
+                if legacy_retry
+                    && (legacy.owner.bot_id != config.id()
+                        || legacy.owner.runtime_id != config.runtime_id())
+                {
+                    return Err(Error::new(
+                        "Initial legacy candidate source does not match this runtime; local work was preserved",
+                    ));
+                }
+                legacy.convert(config)?
+            } else {
+                Self::load(root, config)?
+            }
+        };
+        registry.max_bots = config.budget.max_bots;
+        registry.register(config)?;
+        registry.validate(config)?;
+        Ok(registry)
+    }
+
+    fn validate(&self, config: &Config) -> Result<()> {
+        if self.hub != config.hub {
             return Err(Error::new("Registry hub does not match configuration"));
         }
-        if registry.version != 1
-            || registry.bots.is_empty()
-            || registry.bots.len() > config.budget.max_bots
+        if self.version != 2
+            || self.max_bots == 0
+            || self.bots.is_empty()
+            || self.bots.len() > self.max_bots
         {
-            return Err(Error::new("Invalid registry version or fleet size"));
+            return Err(Error::new("Invalid registry version or max_bots fleet cap"));
         }
         let mut ids = HashSet::new();
         let mut repositories = HashSet::new();
-        for entry in &registry.bots {
+        for entry in &self.bots {
             if !identity(&entry.id)
                 || !identity(&entry.runtime_id)
                 || !password_env_name(&entry.password_env)
@@ -73,23 +175,37 @@ impl Registry {
             }
             config.validate_url(&entry.repository)?;
         }
-        if !registry.bots.iter().any(|entry| {
-            entry.id == registry.owner.bot_id && entry.runtime_id == registry.owner.runtime_id
-        }) {
-            return Err(Error::new("Registry owner must name a current Bot runtime"));
+        Ok(())
+    }
+
+    pub fn register(&mut self, config: &Config) -> Result<bool> {
+        if self.bots.iter().any(|entry| entry.id == config.id()) {
+            self.current(config)?;
+            return Ok(false);
         }
-        Ok(registry)
+        if self.bots.len() >= self.max_bots {
+            return Err(Error::new(
+                "Shared max_bots fleet cap is full; local work was preserved",
+            ));
+        }
+        self.bots.push(Entry::current(config));
+        self.validate(config)?;
+        Ok(true)
+    }
+
+    pub fn write(&self, export: &mut crate::selection::Export) -> Result<()> {
+        let bytes =
+            serde_saphyr::to_string(self).map_err(|_| Error::new("Cannot encode registry v2"))?;
+        export.write("registry.yaml", bytes.as_bytes())
     }
 
     pub fn entry(&self, id: &str) -> Result<&Entry> {
         self.bots
             .iter()
             .find(|entry| entry.id == id)
-            .ok_or_else(|| Error::new("Bot is not authorized by the current registry"))
-    }
-
-    pub fn is_owner(&self, config: &Config) -> bool {
-        self.owner.bot_id == config.id() && self.owner.runtime_id == config.runtime_id()
+            .ok_or_else(|| {
+                Error::new("Bot is absent from the current registry; run setup to register")
+            })
     }
 
     pub fn current_runtime(&self, config: &Config) -> Result<&Entry> {
@@ -119,10 +235,14 @@ impl Registry {
     pub fn credentials(&self, config: &Config) -> Result<()> {
         password(&config.repositories.shared)?;
         password(&config.repositories.bot)?;
-        let mut repositories = vec![
-            (config.repositories.shared.clone(), true),
-            (config.repositories.bot.clone(), config.sharing.bot_data),
-        ];
+        self.access_checks(config)
+    }
+
+    // Validate private access separation using available credentials. Optional
+    // peer passwords, and an unrelated publisher's Bot password, are not required.
+    pub fn access_checks(&self, config: &Config) -> Result<()> {
+        password(&config.repositories.shared)?;
+        let mut repositories = vec![(config.repositories.shared.clone(), true)];
         repositories.extend(
             self.bots
                 .iter()
@@ -162,7 +282,7 @@ impl Registry {
         config: &Config,
         restic: &Restic<'_>,
     ) -> Result<()> {
-        self.credentials(config)?;
+        self.access_checks(config)?;
         for entry in self.bots.iter().filter(|entry| !entry.shared) {
             if previous
                 .bots
@@ -189,7 +309,7 @@ impl Registry {
                 let repository = entry.repository();
                 let old_password = password(&old_repository);
                 let new_password = password(&repository);
-                if old.id != entry.id && (old_password.is_err() || new_password.is_err()) {
+                if old_password.is_err() || new_password.is_err() {
                     continue;
                 }
                 if old_password? == new_password? {

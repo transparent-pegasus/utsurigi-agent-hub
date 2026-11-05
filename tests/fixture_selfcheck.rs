@@ -111,7 +111,7 @@ fn real_restic_fixture_preserves_history_and_injects_failures_after_real_writes(
     let mapped_env = ok(command(&wrapper, root)
         .env(
             "RESTIC_REPOSITORY",
-            "s3:https://example.invalid/fake/shared",
+            "s3:https://compat-acceptance-42.r2.cloudflarestorage.com/fake/shared",
         )
         .args(["snapshots", "--json"])
         .output()
@@ -119,7 +119,7 @@ fn real_restic_fixture_preserves_history_and_injects_failures_after_real_writes(
     assert_eq!(mapped_env.stdout, third.stdout);
     let mapped_arg = ok(command(&wrapper, root)
         .args([
-            "--repo=s3:https://example.invalid/fake/alpha",
+            "--repo=s3:https://compat-acceptance-42.r2.cloudflarestorage.com/fake/alpha",
             "snapshots",
             "--json",
         ])

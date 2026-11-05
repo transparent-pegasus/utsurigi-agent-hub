@@ -87,6 +87,8 @@ fn bots() -> (Fixture, Bot) {
     write(fixture.alpha.path("shared").join("knowledge.md"), b"one");
     fixture.ok(&fixture.alpha, &["setup"]);
     fixture.ok(&beta, &["setup"]);
+    fixture.ok(&fixture.alpha, &["setup"]);
+    fixture.author_current(&fixture.alpha);
     (fixture, beta)
 }
 
@@ -113,12 +115,39 @@ fi
     tool
 }
 
-fn restores(tool: &Path) -> usize {
-    fs::read_to_string(tool.join("calls"))
-        .unwrap()
-        .lines()
-        .filter(|operation| *operation == "restore")
-        .count()
+fn publisher(fixture: &Fixture) -> Bot {
+    let mut publisher = Bot {
+        file: fixture.temp.path().join("publisher.yaml"),
+        config: fixture.alpha.config.clone(),
+    };
+    publisher.config["paths"]["imports"] = json!(fixture.temp.path().join("publisher-imports"));
+    publisher.config["paths"]["state"] = json!(fixture.temp.path().join("publisher-state"));
+    publisher.save();
+    publisher
+}
+
+fn publish_remote(fixture: &Fixture, publisher: &Bot) -> String {
+    let current = fixture.active_shared(&fixture.alpha);
+    let pointer = current.parent().unwrap().parent().unwrap().join("CURRENT");
+    let before = fs::read(&pointer).unwrap();
+    fixture.ok(publisher, &["registry", "publish"]);
+    let accepted = fixture.current_shared_id(publisher);
+    assert_eq!(
+        fixture
+            .active_shared(publisher)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        accepted
+    );
+    assert_eq!(fixture.active_shared(&fixture.alpha), current);
+    assert_eq!(
+        fs::read(pointer).unwrap(),
+        before,
+        "remote publication must leave the reader machine's pointer pending"
+    );
+    accepted
 }
 
 fn reader(root: &Path) -> Running {
@@ -142,50 +171,71 @@ fn release_reader(reader: &mut Running) {
 #[test]
 fn same_snapshot_sync_succeeds_while_an_os_reader_holds_shared_flock() {
     let (fixture, mut beta) = bots();
+    let control = shared_cache_control(&fixture, &beta);
     let tool = tool(&mut beta);
     let first = fixture.active_shared(&beta);
     let root = first.parent().unwrap().parent().unwrap();
     let pointer = fs::read(root.join("CURRENT")).unwrap();
+    let accepted = fixture.shared_head(&beta);
+    assert_eq!(
+        accepted["snapshot"],
+        first.file_name().unwrap().to_str().unwrap()
+    );
     let mut reader = reader(root);
     let mut sync = Running::start(fixture.cli_command(&beta, &["sync"]));
     success(&sync.finish());
     assert_eq!(fs::read(root.join("CURRENT")).unwrap(), pointer);
     assert_eq!(fixture.active_shared(&beta), first);
-    assert_eq!(restores(&tool), 0);
+    assert_eq!(fixture.shared_head(&beta), accepted);
+    assert!(shared_data_restores(&beta, &tool, &control, &[]).is_empty());
     release_reader(&mut reader);
 }
 
 #[test]
-fn authoritative_previous_snapshot_becomes_current_without_another_restore() {
+fn missing_accepted_snapshot_fails_closed_and_preserves_cached_versions() {
     let (fixture, mut beta) = bots();
+    let publisher = publisher(&fixture);
+    let control = shared_cache_control(&fixture, &beta);
     let first = fixture.active_shared(&beta);
     let first_id = first.file_name().unwrap().to_str().unwrap();
     write(fixture.alpha.path("shared").join("knowledge.md"), b"two");
-    fixture.ok(&fixture.alpha, &["registry", "publish"]);
+    publish_remote(&fixture, &publisher);
     fixture.ok(&beta, &["sync"]);
     let second = fixture.active_shared(&beta);
     let second_id = second.file_name().unwrap().to_str().unwrap();
     assert_ne!(first, second);
     let root = second.parent().unwrap().parent().unwrap();
-    let pointer: Value = serde_json::from_slice(&fs::read(root.join("CURRENT")).unwrap()).unwrap();
+    let pointer_bytes = fs::read(root.join("CURRENT")).unwrap();
+    let pointer: Value = serde_json::from_slice(&pointer_bytes).unwrap();
     assert_eq!(pointer["current"], second_id);
     assert_eq!(pointer["previous"], first_id);
 
-    // Forgetting the newer snapshot makes the retained previous one authoritative.
+    let accepted = fixture.shared_head(&beta);
+    assert_eq!(accepted["snapshot"], second_id);
+    let before = fixture.status(&beta);
+    let owned = fixture.ids(&beta, "bot");
+    let mut remaining = fixture.ids(&fixture.alpha, "shared");
+    assert!(remaining.remove(second_id));
+    // External loss of the accepted state must never promote an older cached
+    // snapshot. Its immutable marker cannot carry a newer head revision.
     success(&fixture.restic(&fixture.alpha, "shared", &["forget", second_id]));
-    assert_eq!(
-        fixture.ids(&fixture.alpha, "shared"),
-        [first_id.to_owned()].into_iter().collect()
-    );
-    // A cache populated before pending storage existed must also reuse its source.
-    fs::remove_dir(root.join("pending")).unwrap();
+    assert_eq!(fixture.ids(&fixture.alpha, "shared"), remaining);
+    if root.join("pending").exists() {
+        fs::remove_dir(root.join("pending")).unwrap();
+    }
     let tool = tool(&mut beta);
-    fixture.ok(&beta, &["sync"]);
-    assert_eq!(fixture.active_shared(&beta), first);
-    let pointer: Value = serde_json::from_slice(&fs::read(root.join("CURRENT")).unwrap()).unwrap();
-    assert_eq!(pointer["current"], first_id);
-    assert_eq!(pointer["previous"], second_id);
-    assert_eq!(restores(&tool), 0, "reuse the retained previous version");
+    failure(&fixture.cli(&beta, &["sync"]));
+    assert_eq!(fixture.status(&beta), before);
+    assert_eq!(fixture.active_shared(&beta), second);
+    assert_eq!(fs::read(root.join("CURRENT")).unwrap(), pointer_bytes);
+    assert_eq!(fixture.shared_head(&beta), accepted);
+    assert_eq!(fixture.ids(&beta, "bot"), owned);
+    assert_no_writes(&tool);
+    assert_eq!(
+        shared_data_restores(&beta, &tool, &control, &[]),
+        Vec::<String>::new(),
+        "missing accepted state must not fall back or restore a predecessor"
+    );
     assert_eq!(fs::read(first.join("knowledge.md")).unwrap(), b"one");
     assert_eq!(fs::read(second.join("knowledge.md")).unwrap(), b"two");
 }
@@ -193,11 +243,13 @@ fn authoritative_previous_snapshot_becomes_current_without_another_restore() {
 #[test]
 fn changed_snapshot_waits_for_reader_then_two_bots_restore_only_once() {
     let (mut fixture, mut beta) = bots();
+    let publisher = publisher(&fixture);
+    let control = shared_cache_control(&fixture, &beta);
     let first = fixture.active_shared(&beta);
     let root = first.parent().unwrap().parent().unwrap();
     let pointer = fs::read(root.join("CURRENT")).unwrap();
     write(fixture.alpha.path("shared").join("knowledge.md"), b"two");
-    fixture.ok(&fixture.alpha, &["registry", "publish"]);
+    let accepted = publish_remote(&fixture, &publisher);
     let alpha_tool = tool(&mut fixture.alpha);
     let beta_tool = tool(&mut beta);
     let mut reader = reader(root);
@@ -207,16 +259,23 @@ fn changed_snapshot_waits_for_reader_then_two_bots_restore_only_once() {
     beta_sync.reached(&beta_tool.join("snapshots-returned"));
     alpha_sync.stays_running();
     beta_sync.stays_running();
-    assert_eq!(restores(&alpha_tool) + restores(&beta_tool), 0);
+    assert!(shared_data_restores(&fixture.alpha, &alpha_tool, &control, &[]).is_empty());
+    assert!(shared_data_restores(&beta, &beta_tool, &control, &[]).is_empty());
     assert_no_writes(&alpha_tool);
     assert_no_writes(&beta_tool);
     assert_eq!(fs::read(root.join("CURRENT")).unwrap(), pointer);
     release_reader(&mut reader);
     success(&alpha_sync.finish());
     success(&beta_sync.finish());
-    assert_eq!(restores(&alpha_tool) + restores(&beta_tool), 1);
+    let restored = [
+        shared_data_restores(&fixture.alpha, &alpha_tool, &control, &[&accepted]),
+        shared_data_restores(&beta, &beta_tool, &control, &[&accepted]),
+    ]
+    .concat();
+    assert_eq!(restored, vec![accepted.clone()]);
     let second = fixture.active_shared(&beta);
     assert_ne!(second, first);
+    assert_eq!(second.file_name().unwrap().to_str().unwrap(), accepted);
     assert_eq!(fixture.active_shared(&fixture.alpha), second);
     assert_eq!(fs::read(second.join("knowledge.md")).unwrap(), b"two");
     assert!(first.is_dir());
@@ -227,16 +286,10 @@ fn stalled_upload_releases_cache_and_late_completion_cannot_revert_newer_current
     let (mut fixture, mut beta) = bots();
     let first = fixture.active_shared(&beta);
     let root = first.parent().unwrap().parent().unwrap();
-    // A second command configuration for the registered owner can publish while
-    // the owner's data upload holds its original per-Bot state lock.
-    let mut publisher = Bot {
-        file: fixture.temp.path().join("publisher.yaml"),
-        config: fixture.alpha.config.clone(),
-    };
-    publisher.config["paths"]["state"] = json!(fixture.temp.path().join("publisher-state"));
-    publisher.save();
+    let publisher = publisher(&fixture);
+    let control = shared_cache_control(&fixture, &beta);
     write(fixture.alpha.path("shared").join("knowledge.md"), b"two");
-    fixture.ok(&publisher, &["registry", "publish"]);
+    let second_id = publish_remote(&fixture, &publisher);
     let alpha_tool = tool(&mut fixture.alpha);
     let beta_tool = tool(&mut beta);
     fs::write(alpha_tool.join("mode"), "stall-backup").unwrap();
@@ -264,15 +317,18 @@ fn stalled_upload_releases_cache_and_late_completion_cannot_revert_newer_current
     success(&beta_sync.finish());
     let second = fixture.active_shared(&beta);
     assert_ne!(second, first);
-    assert_eq!(restores(&alpha_tool), 1);
     assert_eq!(
-        restores(&beta_tool),
-        0,
+        shared_data_restores(&fixture.alpha, &alpha_tool, &control, &[&second_id]),
+        vec![second_id.clone()]
+    );
+    assert_eq!(
+        shared_data_restores(&beta, &beta_tool, &control, &[]),
+        Vec::<String>::new(),
         "reuse another Bot's complete unpublished restore"
     );
 
     write(fixture.alpha.path("shared").join("knowledge.md"), b"three");
-    fixture.ok(&publisher, &["registry", "publish"]);
+    let third_id = publish_remote(&fixture, &publisher);
     fixture.ok(&beta, &["sync"]);
     let third = fixture.active_shared(&beta);
     assert_ne!(third, second);
@@ -293,16 +349,26 @@ fn stalled_upload_releases_cache_and_late_completion_cannot_revert_newer_current
         pointer["previous"],
         second.file_name().unwrap().to_str().unwrap()
     );
+    assert_eq!(
+        shared_data_restores(&fixture.alpha, &alpha_tool, &control, &[&second_id]),
+        vec![second_id]
+    );
+    assert_eq!(
+        shared_data_restores(&beta, &beta_tool, &control, &[&third_id]),
+        vec![third_id]
+    );
     release_reader(&mut reader);
 }
 
 #[test]
 fn failed_upload_preserves_current_and_retry_reuses_complete_unpublished_restore() {
     let (fixture, mut beta) = bots();
+    let publisher = publisher(&fixture);
+    let control = shared_cache_control(&fixture, &beta);
     let first = fixture.active_shared(&beta);
     let before = fixture.status(&beta);
     write(fixture.alpha.path("shared").join("knowledge.md"), b"two");
-    fixture.ok(&fixture.alpha, &["registry", "publish"]);
+    let accepted = publish_remote(&fixture, &publisher);
     let tool = tool(&mut beta);
     fs::write(tool.join("mode"), "fail-backup").unwrap();
     failure(&fixture.cli(&beta, &["sync"]));
@@ -311,5 +377,8 @@ fn failed_upload_preserves_current_and_retry_reuses_complete_unpublished_restore
     fs::write(tool.join("mode"), "pass").unwrap();
     fixture.ok(&beta, &["sync"]);
     assert_ne!(fixture.active_shared(&beta), first);
-    assert_eq!(restores(&tool), 1);
+    assert_eq!(
+        shared_data_restores(&beta, &tool, &control, &[&accepted]),
+        vec![accepted]
+    );
 }

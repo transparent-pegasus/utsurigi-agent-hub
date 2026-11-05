@@ -1,0 +1,10 @@
+version: 1
+hub: default
+repository_sha256: "85db6f9972ed7cb33b710b049673f3bf7d86c8b4d122668b66dd9aa34c9f9b81"
+caveman:
+  enabled: true
+  basis: "user_decision"
+  source: "Kunimaru: Q4=A; default hub Caveman=true, relayed in this ownerless-hub session by Shotoku Taishi / Hashida Itaru"
+  recorded_by: "uah-own-orch"
+  recorded_at: "2026-11-04T08:15:37Z"
+  original_decision_at: null

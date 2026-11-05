@@ -1,7 +1,10 @@
 mod budget;
 mod config;
+mod decisions;
 mod error;
+mod head;
 mod history;
+mod migration;
 mod operations;
 mod registry;
 mod restic;
@@ -71,6 +74,15 @@ enum RegistryAction {
 }
 
 fn main() {
+    // Restic invokes this child while holding its normal append lock. It must
+    // never enter dotenv startup or wait for the parent's Bot operation lock.
+    if let Some(result) = migration::helper_command() {
+        if let Err(error) = result {
+            eprintln!("{}", error.message);
+            std::process::exit(error.code);
+        }
+        return;
+    }
     let cli = Cli::parse();
     let result = std::fs::canonicalize(&cli.config)
         .map_err(|_| error::Error::new("Cannot read configuration"))
