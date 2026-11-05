@@ -3,12 +3,14 @@
 Ignored tests are partitioned too and retain libtest's normal ignored semantics.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 from pathlib import Path
 import re
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 
 
@@ -31,12 +33,21 @@ def parse_list(output):
     return sorted(names)
 
 
-def partition(tests, count):
+def partition(tests, count, isolated=()):
     validate_shard(0, count)
     names = sorted(tests)
     if not names or len(set(names)) != len(names):
         raise ValueError("empty or duplicate test identities")
-    groups = [set(names[index::count]) for index in range(count)]
+    identities = {f"{kind}:{target}::{name}": (kind, target, name) for kind, target, name in names}
+    if len(set(isolated)) != len(isolated) or any(identity not in identities for identity in isolated):
+        raise ValueError("unknown or duplicate isolated test identities")
+    dedicated = [identities[identity] for identity in isolated]
+    remaining = [name for name in names if name not in dedicated]
+    available = count - len(dedicated)
+    if available < 0 or (remaining and not available):
+        raise ValueError("require a shard for each isolated test and a shard for remaining tests")
+    groups = [{name} for name in dedicated]
+    groups.extend(set(remaining[index::available]) for index in range(available))
     if set.union(*groups) != set(names) or sum(map(len, groups)) != len(names):
         raise ValueError("test partition is incomplete or overlapping")
     return groups
@@ -48,6 +59,17 @@ def cargo_command(target, excluded):
     for test in sorted(excluded):
         command.extend(["--skip", test])
     return command
+
+
+def run_case(test):
+    kind, target, name = test
+    command = cargo_command((kind, target), []) + [name]
+    started = time.monotonic()
+    try:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    except OSError as error:
+        result = subprocess.CompletedProcess(command, 1, f"sharder: {error}\n")
+    return result, time.monotonic() - started
 
 
 def parse_artifacts(output, package_id, expected):
@@ -96,9 +118,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--shard", type=int)
     parser.add_argument("--shards", type=int, default=8)
+    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--isolate", action="append", default=[])
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
+    if args.workers < 1:
+        parser.error("require --workers > 0")
     if args.self_test:
         self_test()
         return 0
@@ -109,9 +135,14 @@ def main():
     except ValueError as error:
         parser.error(str(error))
     tests = discover()
-    groups = partition([(kind, target, name) for (kind, target), names in tests.items() for name in names], args.shards)
+    try:
+        groups = partition([(kind, target, name) for (kind, target), names in tests.items() for name in names],
+                           args.shards, args.isolate)
+    except ValueError as error:
+        parser.error(str(error))
     print(f"Coverage: {sum(map(len, groups))} listed tests; complete/disjoint shard sizes {list(map(len, groups))}", flush=True)
     failed = 0
+    cases = []
     for target, names in sorted(tests.items()):
         selected = {name for name in names if (*target, name) in groups[args.shard]}
         if not selected:
@@ -120,9 +151,25 @@ def main():
         if args.dry_run:
             for name in sorted(selected):
                 print(f"  {target[0]}:{target[1]}::{name}")
-        else:
+        elif args.workers == 1:
             result = subprocess.run(cargo_command(target, set(names) - selected))
             failed = failed or result.returncode
+        else:
+            cases.extend((*target, name) for name in sorted(selected))
+    if cases:
+        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            futures = {executor.submit(run_case, test): test for test in cases}
+            try:
+                for future in as_completed(futures):
+                    kind, target, name = futures[future]
+                    result, elapsed = future.result()
+                    print(f"Shard {args.shard}: {kind}:{target}::{name} ({elapsed:.2f}s, exit {result.returncode})", flush=True)
+                    print(result.stdout, end="", flush=True)
+                    failed = failed or result.returncode
+            except BaseException:
+                for future in futures:
+                    future.cancel()
+                raise
     return failed
 
 
