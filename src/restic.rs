@@ -692,7 +692,7 @@ impl<'a> Restic<'a> {
         export: &Export,
         kind: &str,
         guard: BackupGuard,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         // Reconcile existing snapshots first; never retry an ambiguous whole write.
         let existing = self.snapshots(repository)?;
         let run_tag = format!("run:{}", export.run_id());
@@ -796,7 +796,23 @@ impl<'a> Restic<'a> {
         if completed.is_none() || matching.next().is_some() {
             return Err(Error::new("Completion marker could not be reconciled"));
         }
-        Ok(())
+        // Only pre-write, complete versions can be replaced. Keep uncertain
+        // snapshots for inspection and never select a concurrent writer's work.
+        Ok(existing
+            .into_iter()
+            .filter(|snapshot| {
+                snapshot.completed_at().is_some()
+                    && snapshot
+                        .tag("runtime:")
+                        .is_some_and(|value| !value.is_empty())
+                    && snapshot.tag("bot:").is_some_and(|id| {
+                        !id.is_empty()
+                            && snapshot.owned_by(id, kind)
+                            && (kind == "shared" || id == self.config.id())
+                    })
+            })
+            .map(|snapshot| snapshot.id)
+            .collect())
     }
 
     pub fn restore(&self, repository: &Repository, id: &str, destination: &Path) -> Result<()> {

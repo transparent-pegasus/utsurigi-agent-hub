@@ -53,6 +53,7 @@ sharing:
 sync:
   interval_seconds: 86400
   start_time: "03:00"
+  versioning: true # OFF replaces verified backups only after successful publication.
   history_retention_seconds: 2592000
   retry_lock_seconds: 120 # Bounded lock wait; zero disables waiting.
   transport_retries: 5 # restic backend retries; whole writes are not replayed.

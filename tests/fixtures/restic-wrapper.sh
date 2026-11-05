@@ -48,6 +48,8 @@ case "$mode:$operation" in
         exit 1
         ;;
     auth:backup) printf '%s\n' 'Fatal: wrong password or no key found' >&2; exit 1 ;;
+    tag-failure:tag|forget-failure:forget)
+        printf "%s\n" "synthetic write failure" >&2; exit 1 ;;
     partial:backup)
         "$fixture_dir/real-restic" "$@"
         exit 3

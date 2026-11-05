@@ -648,6 +648,7 @@ fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> 
             .check(&imported.data.registry, restic)?;
         private_repository(config, restic, &imported.data.history)?;
         let history_changed = previous_history != imported.data.history;
+        let mut predecessors = Vec::new();
         if changed || history_changed {
             rewrite_metadata(config, &mut imported.data, revision)?;
             shared_budget(config, imported.data.export.bytes)?;
@@ -657,15 +658,18 @@ fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> 
                 &store,
                 Some(&imported.observed),
                 &imported.data,
-                BackupGuard::InitialSetup,
+                BackupGuard::Persistent,
             )? {
+                state::finish_backup(config.paths.state.as_ref().expect("runtime configuration"))?;
                 continue;
             }
+            predecessors.push(imported.observed.head.snapshot.clone());
             imported = import_shared(config, restic)?;
             imported.data.registry.current(config)?;
         }
         initialize_schedule(config, state)?;
         imported.publish()?;
+        cleanup_predecessors(config, restic, &config.repositories.shared, predecessors)?;
         state.joined = true;
         return Ok(());
     }
@@ -700,7 +704,7 @@ fn sync(config: &Config, restic: &Restic<'_>, state: &mut State, scheduled: bool
             .expect("runtime configuration")],
         export.bytes,
     )?;
-    restic.backup(
+    let predecessors = restic.backup(
         &config.repositories.bot,
         &export,
         "bot",
@@ -716,6 +720,7 @@ fn sync(config: &Config, restic: &Restic<'_>, state: &mut State, scheduled: bool
         )?);
     }
     imported.publish()?;
+    cleanup_predecessors(config, restic, &config.repositories.bot, predecessors)?;
     state.joined = true;
     Ok(())
 }
@@ -801,7 +806,32 @@ fn publish(config: &Config, restic: &Restic<'_>, takeover: bool) -> Result<()> {
         REVISION_FILE,
         &fs::read(data.export.tree.path().join(REVISION_FILE))?,
     )?;
-    import_shared(config, restic)?.publish()
+    import_shared(config, restic)?.publish()?;
+    cleanup_predecessors(
+        config,
+        restic,
+        &config.repositories.shared,
+        vec![imported.observed.head.snapshot],
+    )
+}
+
+fn cleanup_predecessors(
+    config: &Config,
+    restic: &Restic<'_>,
+    repository: &Repository,
+    predecessors: Vec<String>,
+) -> Result<()> {
+    if !config.sync.versioning && !predecessors.is_empty() {
+        budget::authorize(
+            config,
+            &[repository.url.as_deref().expect("runtime configuration")],
+            0,
+        )?;
+        let mut args: Vec<std::ffi::OsString> = vec!["forget".into(), "--prune".into()];
+        args.extend(predecessors.into_iter().map(std::ffi::OsString::from));
+        restic.run(repository, &args, None)?;
+    }
+    Ok(())
 }
 
 fn destination(config: &Config, path: &Path) -> Result<std::path::PathBuf> {

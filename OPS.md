@@ -64,11 +64,21 @@ A successful scheduled sync advances the due time; manual sync keeps it. On
 nonzero results, suspend automatic retries; inspect and reconcile before
 resuming. A failed sync keeps its due time and does not authorize another write.
 Before sync/publication writes, the CLI saves `paths.state/pending-backup.yaml`.
-It clears this record only after remote verification and local publication succeed.
+It clears this record only after remote verification, local publication, and any
+required history cleanup succeed.
 While it exists, setup/sync/publication/prune stop; follow [reconciliation](RECOVERY.md#reconcile-a-backup).
 `sync.retry_lock_seconds` bounds restic lock waiting (default 120 seconds; zero
 disables waiting), not whole-operation retry. A peer reader can delay completion
 marking up to that bound.
+
+`sync.versioning` defaults to `true`: completed payload versions remain until an
+explicit `prune`. With `false`, a successful sync or shared publication keeps the
+new verified backup and removes only the completed predecessors present before
+that write, after local publication succeeds. Incomplete or uncertain snapshots
+remain available for inspection; changing the setting alone never deletes history.
+If cleanup fails, the verified backup remains and the pending-write guard blocks
+another write until reconciliation. The shared cache still retains its current
+and previous reader versions.
 
 Restic deduplicates data, but small SQLite changes may resend the entire database.
 No per-record incremental transfer or fixed latency is guaranteed.
@@ -77,8 +87,8 @@ No per-record incremental transfer or fixed latency is guaranteed.
 
 Local staging is plaintext and private to the host. After operations and readers
 stop, remove crash-left `export-*` trees under `paths.state` if needed.
-Protect current/previous shared versions and local originals. Repository history
-cleanup requires explicit `prune`; see [RECOVERY.md](RECOVERY.md).
+Protect current/previous shared versions and local originals. With versioning on,
+repository history cleanup requires explicit `prune`; see [RECOVERY.md](RECOVERY.md).
 
 Host exports live databases consistently and keeps exports quiescent during sync.
 Declare SQLite exports in `data.sqlite_snapshots`; live files and WAL/SHM are not

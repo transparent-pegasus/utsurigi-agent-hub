@@ -141,11 +141,16 @@ pass. Delete the temporary plaintext comparison copy after successful acceptance
 keep the original sources according to their approved retention policy.
 
 Incomplete/uncertain writes never authorize deletion of the prior successful
-version. A completed predecessor expires only after its unique successful
-successor reaches `sync.history_retention_seconds` in age. That setting expires
-Bot payload versions, not the cumulative identifier guard. Cleanup requires
-explicit `prune`; never force-unlock another process. This version retains shared
-v2 states and migration captures; shared storage can grow and reach a budget hold.
+version. With `sync.versioning: true` (default), a completed predecessor expires
+only after its unique successful successor reaches `sync.history_retention_seconds`
+in age; cleanup requires explicit `prune`. With `false`, sync or shared publication
+removes only pre-write completed predecessors after the new backup is verified and
+local publication succeeds. The new backup remains if cleanup fails, and the
+pending-write guard blocks another write until reconciliation. Incomplete or
+uncertain snapshots remain available for inspection. These settings expire Bot
+payload versions, not the cumulative identifier guard. Never force-unlock another
+process. This version retains shared v2 states and migration captures; shared
+storage can grow and reach a budget hold.
 
 `setup` migrates a valid v1 hub automatically. It preserves source data in a retained
 snapshot and records a format marker that makes old CLI shared operations stop.

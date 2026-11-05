@@ -180,6 +180,7 @@ impl Default for Sharing {
 pub struct Sync {
     pub interval_seconds: u64,
     pub start_time: String,
+    pub versioning: bool,
     pub history_retention_seconds: u64,
     pub retry_lock_seconds: u64,
     pub transport_retries: u32,
@@ -194,6 +195,7 @@ impl Default for Sync {
         Self {
             interval_seconds: 86400,
             start_time: "03:00".into(),
+            versioning: true,
             history_retention_seconds: 2592000,
             retry_lock_seconds: 120,
             transport_retries: 5,
