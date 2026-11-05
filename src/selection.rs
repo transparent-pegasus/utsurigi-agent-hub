@@ -2,13 +2,20 @@ use crate::config::{Config, no_symlinks, relative};
 use crate::error::{Error, IoContext, Result};
 use crate::state::private_dir;
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::{self, File, FileTimes, Metadata, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 pub struct Export {
     pub tree: tempfile::TempDir,
     pub bytes: u64,
+}
+
+impl Drop for Export {
+    fn drop(&mut self) {
+        // TempDir removes children after this; preserved directories may be read-only.
+        let _ = writable_directories(self.tree.path(), Path::new("."));
+    }
 }
 
 impl Export {
@@ -76,15 +83,12 @@ pub fn copy_verified(config: &Config, root: &Path) -> Result<Export> {
                 crate::state::private_file(&output, &target.join(&name))?;
                 let size = std::io::copy(&mut source, &mut output)?;
                 let after = source.metadata()?;
-                if !before.is_file()
-                    || before.len() != size
-                    || before.len() != after.len()
-                    || before.modified()? != after.modified()?
-                {
+                if !before.is_file() || before.len() != size || !unchanged(&before, &after)? {
                     return Err(Error::new(
                         "Shared source changed during copy; retry the read",
                     ));
                 }
+                preserve_metadata(&output, &before)?;
                 *bytes = bytes
                     .checked_add(size)
                     .ok_or_else(|| Error::new("Source size overflow"))?;
@@ -100,9 +104,202 @@ pub fn copy_verified(config: &Config, root: &Path) -> Result<Export> {
     let tree = tempfile::Builder::new()
         .prefix("shared-copy-")
         .tempdir_in(config.paths.state.as_ref().expect("runtime configuration"))?;
+    private_dir(tree.path())?;
     let mut bytes = 0;
     copy(root, Path::new("."), tree.path(), &mut bytes)?;
-    Ok(Export { tree, bytes })
+    let export = Export { tree, bytes };
+    preserve_directories(root, export.tree.path(), Path::new("."))?;
+    Ok(export)
+}
+
+fn preserve_metadata(file: &File, metadata: &Metadata) -> Result<()> {
+    file.set_times(FileTimes::new().set_modified(metadata.modified()?))?;
+    file.set_permissions(metadata.permissions())?;
+    Ok(())
+}
+
+fn writable_directories(root: &Path, relative: &Path) -> Result<()> {
+    let directory = open_source(root, relative)?;
+    let metadata = directory.metadata()?;
+    if !metadata.is_dir() {
+        return Err(Error::new(
+            "Cleanup requires an application-owned directory",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        directory.set_permissions(fs::Permissions::from_mode(
+            metadata.permissions().mode() | 0o700,
+        ))?;
+    }
+    for entry in fs::read_dir(root.join(relative))? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            writable_directories(root, &relative.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn remove_tree(root: &Path) -> Result<()> {
+    no_symlinks(root)?;
+    writable_directories(root, Path::new("."))?;
+    fs::remove_dir_all(root).at("Cannot remove application-owned tree", root)
+}
+
+fn unchanged(before: &Metadata, after: &Metadata) -> Result<bool> {
+    let same = before.len() == after.len()
+        && before.modified()? == after.modified()?
+        && before.permissions() == after.permissions();
+    #[cfg(unix)]
+    let same = {
+        use std::os::unix::fs::MetadataExt;
+        same && before.ctime() == after.ctime() && before.ctime_nsec() == after.ctime_nsec()
+    };
+    Ok(same)
+}
+
+fn preserve_directories(root: &Path, target: &Path, relative: &Path) -> Result<()> {
+    for entry in fs::read_dir(target.join(relative))? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            preserve_directories(root, target, &relative.join(entry.file_name()))?;
+        }
+    }
+    let source = open_source(root, relative)?;
+    let metadata = source.metadata()?;
+    if !metadata.is_dir() {
+        return Err(Error::new("Selected directory changed during export"));
+    }
+    let directory = File::open(target.join(relative))?;
+    // Apply after all includes/children: creating files changes parent mtimes.
+    directory.set_times(FileTimes::new().set_modified(metadata.modified()?))?;
+    if relative != Path::new(".") {
+        directory.set_permissions(metadata.permissions())?;
+    }
+    Ok(())
+}
+
+fn link_captured(root: &Path, relative: &Path, target: &Path, source: &File) -> Result<()> {
+    no_symlinks(&root.join(relative))?;
+    fs::hard_link(root.join(relative), target.join(relative))?;
+    let linked = open_source(target, relative)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let before = source.metadata()?;
+        let after = linked.metadata()?;
+        if before.dev() != after.dev() || before.ino() != after.ino() {
+            return Err(Error::new("Captured export changed during reuse"));
+        }
+    }
+    Ok(())
+}
+
+fn reuse_captured(
+    config: &Config,
+    relative: &Path,
+    target: &Path,
+    source: &mut File,
+) -> Result<bool> {
+    let root = config
+        .paths
+        .state
+        .as_ref()
+        .expect("runtime configuration")
+        .join("owned-export");
+    let path = root.join(relative);
+    // A previous capture may have files where the current source has directories.
+    let mut cursor = std::path::PathBuf::new();
+    for component in path.components() {
+        cursor.push(component);
+        match fs::symlink_metadata(&cursor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(Error::new(format!(
+                    "Symlink paths are not allowed: {}",
+                    cursor.display()
+                )));
+            }
+            Ok(_) => (),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => {
+                return Err(Error::new(format!(
+                    "Cannot inspect path {}: {error}",
+                    cursor.display()
+                )));
+            }
+        }
+    }
+    let mut captured = open_source(&root, relative)?;
+    let before = captured.metadata()?;
+    let original = source.metadata()?;
+    if !before.is_file()
+        || before.len() != original.len()
+        || before.modified()? != original.modified()?
+        || before.permissions() != original.permissions()
+    {
+        return Ok(false);
+    }
+    source.rewind()?;
+    let mut current = [0; 64 * 1024];
+    let mut previous = [0; 64 * 1024];
+    loop {
+        let count = source.read(&mut current)?;
+        if count == 0 {
+            break;
+        }
+        captured.read_exact(&mut previous[..count])?;
+        if current[..count] != previous[..count] {
+            return Ok(false);
+        }
+    }
+    if !unchanged(&before, &captured.metadata()?)? {
+        return Ok(false);
+    }
+    link_captured(&root, relative, target, &captured)?;
+    Ok(true)
+}
+
+fn retain_owned(config: &Config, export: &Path) -> Result<()> {
+    fn link_tree(root: &Path, relative: &Path, target: &Path) -> Result<()> {
+        private_dir(&target.join(relative))?;
+        for entry in fs::read_dir(root.join(relative))? {
+            let entry = entry?;
+            let name = relative.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                link_tree(root, &name, target)?;
+            } else {
+                let source = open_source(root, &name)?;
+                if !source.metadata()?.is_file() {
+                    return Err(Error::new("Captured export must contain regular files"));
+                }
+                link_captured(root, &name, target, &source)?;
+            }
+        }
+        Ok(())
+    }
+    let state = config.paths.state.as_ref().expect("runtime configuration");
+    let tree = tempfile::Builder::new()
+        .prefix("owned-capture-")
+        .tempdir_in(state)?;
+    let capture = Export { tree, bytes: 0 };
+    link_tree(export, Path::new("."), capture.tree.path())?;
+    preserve_directories(export, capture.tree.path(), Path::new("."))?;
+    let previous = state.join("owned-export");
+    no_symlinks(&previous)?;
+    if previous.try_exists()? {
+        remove_tree(&previous)?;
+    }
+    fs::rename(capture.tree.path(), &previous)?;
+    Ok(())
 }
 
 const EXCLUDED_NAMES: &[&str] = &[
@@ -247,6 +444,7 @@ pub fn export(config: &Config, shared: bool) -> Result<Export> {
         .prefix("export-")
         .tempdir_in(state)
         .at("Cannot create export staging in", state)?;
+    private_dir(tree.path())?;
     let extra = if shared {
         GlobSetBuilder::new()
             .build()
@@ -276,7 +474,12 @@ pub fn export(config: &Config, shared: bool) -> Result<Export> {
             &mut bytes,
         )?;
     }
-    Ok(Export { tree, bytes })
+    let export = Export { tree, bytes };
+    preserve_directories(root, export.tree.path(), Path::new("."))?;
+    if !shared {
+        retain_owned(config, export.tree.path())?;
+    }
+    Ok(export)
 }
 
 fn copy_tree(
@@ -369,26 +572,26 @@ fn copy_tree(
         if let Some(parent) = target.parent() {
             private_dir(parent)?;
         }
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&target)
-            .at("Cannot create export", &target)?;
-        output
-            .write_all(&prefix[..count])
-            .at("Cannot write export", &target)?;
-        let copied =
-            std::io::copy(&mut file, &mut output).at("Cannot copy source", &source)? + count as u64;
+        let copied = if !shared && reuse_captured(config, relative_path, destination, &mut file)? {
+            before.len()
+        } else {
+            file.seek(SeekFrom::Start(count as u64))?;
+            let mut output = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)
+                .at("Cannot create export", &target)?;
+            crate::state::private_file(&output, &target)?;
+            output
+                .write_all(&prefix[..count])
+                .at("Cannot write export", &target)?;
+            let copied = std::io::copy(&mut file, &mut output).at("Cannot copy source", &source)?
+                + count as u64;
+            preserve_metadata(&output, &before)?;
+            copied
+        };
         let after = file.metadata().at("Cannot inspect source", &source)?;
-        if before.len() != copied
-            || before.len() != after.len()
-            || before
-                .modified()
-                .at("Cannot read source timestamp", &source)?
-                != after
-                    .modified()
-                    .at("Cannot read source timestamp", &source)?
-        {
+        if before.len() != copied || !unchanged(&before, &after)? {
             return Err(Error::new(
                 "Selected file changed during export; keep source snapshots quiescent",
             ));

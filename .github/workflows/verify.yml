@@ -10,7 +10,7 @@ defaults:
     shell: bash
 
 jobs:
-  verify:
+  checks:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -22,23 +22,14 @@ jobs:
           rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
           rustup default 1.99.1
 
-      - name: Install restic
-        run: |
-          curl -fsSL https://github.com/restic/restic/releases/download/v0.19.1/restic_0.19.1_linux_amd64.bz2 -o "$RUNNER_TEMP/restic.bz2"
-          echo "f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c  $RUNNER_TEMP/restic.bz2" | sha256sum --check
-          mkdir -p "$RUNNER_TEMP/bin"
-          bzip2 --decompress --stdout "$RUNNER_TEMP/restic.bz2" > "$RUNNER_TEMP/bin/restic"
-          chmod +x "$RUNNER_TEMP/bin/restic"
-          "$RUNNER_TEMP/bin/restic" version
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-          echo "UTSURIGI_AGENT_HUB_TEST_RESTIC=$RUNNER_TEMP/bin/restic" >> "$GITHUB_ENV"
-
       - name: Check utsurigi-agent-hub
         run: |
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
-          cargo test --locked -- --test-threads=1
           cargo run --locked -- validate --template
+
+      - name: Check test sharder
+        run: python3 .github/scripts/shard-hub-tests.py --self-test
 
       - name: Check optional utsurigi-memory
         run: |
@@ -58,3 +49,47 @@ jobs:
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked
+
+  hub-tests:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
+
+      - name: Install restic
+        run: |
+          curl -fsSL https://github.com/restic/restic/releases/download/v0.19.1/restic_0.19.1_linux_amd64.bz2 -o "$RUNNER_TEMP/restic.bz2"
+          echo "f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c  $RUNNER_TEMP/restic.bz2" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/bin"
+          bzip2 --decompress --stdout "$RUNNER_TEMP/restic.bz2" > "$RUNNER_TEMP/bin/restic"
+          chmod +x "$RUNNER_TEMP/bin/restic"
+          "$RUNNER_TEMP/bin/restic" version
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          echo "UTSURIGI_AGENT_HUB_TEST_RESTIC=$RUNNER_TEMP/bin/restic" >> "$GITHUB_ENV"
+
+      - name: Run hub test shard
+        run: python3 .github/scripts/shard-hub-tests.py --shard ${{ matrix.shard }} --shards 8
+
+  verify:
+    name: verify
+    if: ${{ always() }}
+    needs: [checks, hub-tests]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require checks and every test shard
+        env:
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          TESTS_RESULT: ${{ needs.hub-tests.result }}
+        run: |
+          test "$CHECKS_RESULT" = success
+          test "$TESTS_RESULT" = success

@@ -111,6 +111,8 @@ password as `RESTIC_PASSWORD` and storage credentials; R2 also needs
 inspect it before adopting data. Restore accepts same-hub incomplete and
 historical publisher snapshots for inspection; it does not make them current authority.
 Its plaintext staging directory is created with mode 0700.
+Restore leaves host-managed `user.hatch_tainted*` extended attributes untouched;
+other extended attributes and content verification retain normal restic behavior.
 
 Run `restic --repo SELECTED_REPOSITORY_URL check` with the same binary, secure
 delivery, and R2 option before accepting recovery. Coordinate a shared-repository

@@ -169,6 +169,40 @@ fn release_reader(reader: &mut Running) {
 }
 
 #[test]
+fn owned_backup_keeps_captured_bytes_stable_while_the_live_source_changes() {
+    let (fixture, mut beta) = bots();
+    let source = beta.path("owned").join("notes/changing.md");
+    write(&source, b"before");
+    let tool = tool(&mut beta);
+    fs::write(tool.join("mode"), "stall-backup").unwrap();
+    let mut sync = Running::start(fixture.cli_command(&beta, &["sync"]));
+    sync.reached(&tool.join("backup-started"));
+    fs::write(&source, b"after!").unwrap();
+    fs::write(tool.join("release"), "").unwrap();
+    success(&sync.finish());
+    let snapshots = fixture.ids(&beta, "bot");
+    assert_eq!(snapshots.len(), 1);
+    let destination = fixture.temp.path().join("stable-capture");
+    fixture.ok(
+        &beta,
+        &[
+            "restore",
+            "--repository",
+            "bot",
+            "--snapshot",
+            snapshots.first().unwrap(),
+            "--destination",
+            destination.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        fs::read(destination.join("notes/changing.md")).unwrap(),
+        b"before"
+    );
+    assert_eq!(fs::read(source).unwrap(), b"after!");
+}
+
+#[test]
 fn same_snapshot_sync_succeeds_while_an_os_reader_holds_shared_flock() {
     let (fixture, mut beta) = bots();
     let control = shared_cache_control(&fixture, &beta);
@@ -383,4 +417,165 @@ fn failed_upload_preserves_current_and_retry_reuses_complete_unpublished_restore
         shared_data_restores(&beta, &tool, &control, &[&accepted]),
         vec![accepted]
     );
+}
+
+fn tree_bytes(root: &Path) -> u64 {
+    fs::read_dir(root)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                tree_bytes(&entry.path())
+            } else {
+                assert!(kind.is_file(), "cache must contain regular data");
+                entry.metadata().unwrap().len()
+            }
+        })
+        .sum()
+}
+
+fn bounded_pending_after(operation: &str) {
+    let (fixture, mut beta) = bots();
+    fixture.ok(&fixture.alpha, &["sync"]);
+    fixture.author_current(&beta);
+    let publisher = publisher(&fixture);
+    let tool = tool(&mut beta);
+    let initial = fixture.active_shared(&beta);
+    let root = initial.parent().unwrap().parent().unwrap();
+    let mut validated = std::collections::BTreeMap::new();
+    for entry in fs::read_dir(root.join("versions")).unwrap() {
+        let path = entry.unwrap().path();
+        validated.insert(
+            path.file_name().unwrap().to_str().unwrap().to_owned(),
+            fs::read(path.join("knowledge.md")).unwrap(),
+        );
+    }
+    let mut usage = Vec::new();
+    let mut largest_tree = 0;
+    for generation in 1..=3 {
+        let knowledge = vec![b'1' + generation; 64 * 1024];
+        write(
+            fixture.alpha.path("shared").join("knowledge.md"),
+            &knowledge,
+        );
+        let accepted = publish_remote(&fixture, &publisher);
+        let expected_head = fixture.shared_head(&publisher);
+        validated.insert(accepted, knowledge);
+        largest_tree = largest_tree.max(tree_bytes(&fixture.active_shared(&publisher)));
+        let before = fs::read(root.join("CURRENT")).unwrap();
+        fs::write(tool.join("calls"), "").unwrap();
+        match operation {
+            "pull" => {
+                let destination = fixture.temp.path().join(format!("pull-{generation}"));
+                fixture.ok(
+                    &beta,
+                    &[
+                        "pull",
+                        "alpha",
+                        "--destination",
+                        destination.to_str().unwrap(),
+                    ],
+                );
+                assert_eq!(
+                    fs::read(destination.join("notes/日本語.md")).unwrap(),
+                    PAYLOAD
+                );
+            }
+            "prune" => {
+                fixture.ok(&beta, &["prune"]);
+            }
+            "rejected-publish" => {
+                failure(&fixture.cli(&beta, &["registry", "publish"]));
+                assert_no_writes(&tool);
+                assert_eq!(fs::read(root.join("CURRENT")).unwrap(), before);
+            }
+            "failed-sync" => {
+                fs::write(tool.join("mode"), "fail-backup").unwrap();
+                let output = fixture.cli(&beta, &["sync"]);
+                failure(&output);
+                assert!(
+                    text(&output).contains("synthetic upload failure"),
+                    "{}",
+                    text(&output)
+                );
+                assert_eq!(fs::read(root.join("CURRENT")).unwrap(), before);
+                assert!(fixture.ids(&beta, "bot").is_empty());
+                fs::write(tool.join("mode"), "pass").unwrap();
+                // Reconcile the deliberately failed pre-upload attempt, as in the retry race above.
+                fs::remove_file(beta.path("state").join("pending-backup.yaml")).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            fixture.shared_head(&beta),
+            expected_head,
+            "{operation} must not publish a rejected or failed candidate"
+        );
+        let current = fixture.active_shared(&beta);
+        let pointer: Value =
+            serde_json::from_slice(&fs::read(root.join("CURRENT")).unwrap()).unwrap();
+        assert_eq!(
+            pointer["current"],
+            current.file_name().unwrap().to_str().unwrap()
+        );
+        for id in [pointer["current"].as_str(), pointer["previous"].as_str()]
+            .into_iter()
+            .flatten()
+        {
+            assert_eq!(
+                fs::read(root.join("versions").join(id).join("knowledge.md")).unwrap(),
+                *validated
+                    .get(id)
+                    .expect("CURRENT must only reference validated generations")
+            );
+        }
+        assert!(
+            fs::read_dir(root.join("versions")).unwrap().count() <= 2,
+            "retain only CURRENT current/previous versions"
+        );
+        assert_eq!(
+            fs::read(beta.path("owned").join("notes/日本語.md")).unwrap(),
+            PAYLOAD
+        );
+        let pending = root.join("pending");
+        let (count, bytes) = if pending.exists() {
+            (
+                fs::read_dir(&pending).unwrap().count(),
+                tree_bytes(&pending),
+            )
+        } else {
+            (0, 0)
+        };
+        eprintln!(
+            "{operation} generation {generation}: pending generations={count}, bytes={bytes}"
+        );
+        usage.push((count, bytes));
+    }
+    assert!(
+        usage
+            .iter()
+            .all(|(count, bytes)| *count <= 1 && *bytes <= largest_tree),
+        "{operation} accumulated pending cache storage: {usage:?}; retain at most one sequential pending generation ({largest_tree} bytes)"
+    );
+}
+
+#[test]
+fn successive_pull_only_imports_keep_pending_cache_storage_bounded() {
+    bounded_pending_after("pull");
+}
+
+#[test]
+fn successive_prunes_keep_pending_cache_storage_bounded() {
+    bounded_pending_after("prune");
+}
+
+#[test]
+fn successive_rejected_publications_keep_pending_cache_storage_bounded() {
+    bounded_pending_after("rejected-publish");
+}
+
+#[test]
+fn successive_failed_syncs_keep_pending_cache_storage_bounded() {
+    bounded_pending_after("failed-sync");
 }

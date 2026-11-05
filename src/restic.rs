@@ -827,6 +827,9 @@ impl<'a> Restic<'a> {
                 "--target".into(),
                 destination.as_os_str().to_owned(),
                 "--verify".into(),
+                // The host owns these attributes and may forbid removing them.
+                "--exclude-xattr".into(),
+                "user.hatch_tainted*".into(),
             ],
             None,
         )?;

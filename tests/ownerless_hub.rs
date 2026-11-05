@@ -942,6 +942,56 @@ fn pull_rejects_wrong_hub_bot_or_runtime_source_identity() {
 }
 
 #[test]
+fn migration_restores_with_verification_under_enforced_host_xattrs() {
+    let mut fixture = Fixture::new();
+    let (_, history) = legacy(&fixture, &[&fixture.alpha]);
+    machine(&mut fixture.alpha, 8);
+    let tool = wrapper(&mut fixture.alpha, "host-xattrs");
+    ok(&fixture, &fixture.alpha, &["setup"]);
+    assert!(tool.join("host-xattrs-checked").is_file());
+    let current = active(&fixture, &fixture.alpha);
+    assert_eq!(registry(&current)["version"], 2);
+    assert_eq!(fs::read(current.join("knowledge.md")).unwrap(), KNOWLEDGE);
+    assert_history_preserved(&current, &history);
+    raw(
+        &fixture,
+        &fixture.alpha,
+        "shared",
+        &fixture.alpha.path("shared"),
+        &["check"],
+    );
+}
+
+#[test]
+fn migration_does_not_hide_restore_content_verification_failures() {
+    let mut fixture = Fixture::new();
+    legacy(&fixture, &[&fixture.alpha]);
+    let before = snapshot_ids(&fixture, &fixture.alpha);
+    let authored = fs::read(fixture.alpha.path("shared").join("registry.yaml")).unwrap();
+    machine(&mut fixture.alpha, 8);
+    wrapper(&mut fixture.alpha, "content-failure");
+    let output = fixture.cli(&fixture.alpha, &["setup"]);
+    failure(&output);
+    assert!(
+        text(&output).contains("synthetic restored content verification failure"),
+        "{}",
+        text(&output)
+    );
+    assert_eq!(snapshot_ids(&fixture, &fixture.alpha), before);
+    assert_eq!(
+        fs::read(fixture.alpha.path("shared").join("registry.yaml")).unwrap(),
+        authored
+    );
+    assert_eq!(registry(&fixture.alpha.path("shared"))["version"], 1);
+    assert!(status(&fixture, &fixture.alpha)["active_shared"].is_null());
+    assert!(
+        !Path::new(fixture.alpha.repository("shared"))
+            .join("uah-head.json")
+            .exists()
+    );
+}
+
+#[test]
 fn nonowner_setup_automatically_migrates_v1_and_preserves_history_and_private_metadata() {
     let fixture = Fixture::new();
     let mut private = fixture.bot("beta", "beta-private");
