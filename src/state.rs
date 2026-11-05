@@ -1,20 +1,146 @@
 use crate::config::no_symlinks;
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
     pub hub: String,
     pub last_success: Option<i64>,
     pub anchor: Option<i64>,
     pub next_due: Option<i64>,
+    #[serde(default)]
+    pub joined: bool,
+    #[serde(default)]
+    pub failures: BTreeMap<String, Failure>,
     #[serde(default, rename = "active_shared", skip_serializing)]
     pub _active_shared: Option<PathBuf>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Failure {
+    pub operation: String,
+    pub category: String,
+    pub reason: String,
+    pub next_action: String,
+    pub recorded_at: i64,
+}
+
+impl Failure {
+    pub fn sanitized(operation: &str, error: &Error) -> Self {
+        // Match only known categories. Never persist the child diagnostic,
+        // repository paths, environment, or any part of a credential value.
+        let message = error
+            .message
+            .split("; stderr:")
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let (category, reason, next_action) = if error.code == 12
+            || message.contains("password")
+            || message.contains("credential")
+            || message.contains("authentication")
+        {
+            (
+                "authentication",
+                "Repository authentication failed or a required password was not delivered",
+                "Check host-delivered repository credentials, then retry this operation",
+            )
+        } else if error.code == 11 || message.contains("lock") {
+            (
+                "locked",
+                "A required repository or local state lock is unavailable",
+                "Let the active operation finish, then retry; preserve existing locks",
+            )
+        } else if message.contains("budget") || message.contains("attestation") {
+            (
+                "budget",
+                "The source is outside the authorized storage budget",
+                "Provide a valid repository and source-size budget attestation, then retry",
+            )
+        } else if message.contains("max_bots") || message.contains("fleet") {
+            (
+                "capacity",
+                "The shared max_bots cap cannot admit this registration",
+                "Review the current shared registry capacity, then retry setup",
+            )
+        } else if message.contains("private")
+            || message.contains("history")
+            || message.contains("master key")
+        {
+            (
+                "private_history",
+                "Repository identity or private-history safeguards rejected the operation",
+                "Review shared identifier history and use a separate private repository, password access and master key",
+            )
+        } else if message.contains("runtime") || message.contains("superseded") {
+            (
+                "identity",
+                "The Bot runtime or repository conflicts with the current shared identity",
+                "Reconcile the Bot runtime and repository with the current registry; local work was preserved",
+            )
+        } else if message.contains("stale")
+            || message.contains("authoring")
+            || message.contains("revision")
+            || message.contains("conflict")
+        {
+            (
+                "conflict",
+                "The authoring base is missing, stale, or lost a shared-head comparison",
+                "Copy verified active_shared, omit generated registry-history.json, reconcile local edits, then explicitly publish",
+            )
+        } else if message.contains("decision") {
+            (
+                "decisions",
+                "The decision record has invalid schema, provenance, or scope",
+                "Correct decisions.yaml for this hub and shared repository, then retry",
+            )
+        } else if message.contains("restic")
+            && (message.contains("unavailable")
+                || message.contains("incompatible")
+                || message.contains("executable"))
+        {
+            (
+                "restic",
+                "A compatible restic executable could not be opened",
+                "Configure or install the pinned restic executable, then retry setup",
+            )
+        } else if error.code == 10 {
+            (
+                "repository",
+                "The required repository does not exist",
+                "Check the configured repository location and run setup or explicit recovery",
+            )
+        } else if message.contains("snapshot")
+            || message.contains("fence")
+            || message.contains("registry")
+        {
+            (
+                "shared_data",
+                "Shared snapshot, registry or migration metadata could not be verified",
+                "Inspect the configured shared repository and recover valid data before retrying",
+            )
+        } else {
+            (
+                "operation",
+                "The operation could not complete with the current configuration or storage",
+                "Check local configuration, source files and storage availability, then retry this operation",
+            )
+        };
+        Self {
+            operation: operation.to_owned(),
+            category: category.to_owned(),
+            reason: reason.to_owned(),
+            next_action: next_action.to_owned(),
+            recorded_at: chrono::Utc::now().timestamp(),
+        }
+    }
 }
 
 pub struct Lock {

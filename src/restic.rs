@@ -15,6 +15,7 @@ pub struct Restic<'a> {
     executable: PathBuf,
     cache: PathBuf,
     temp: PathBuf,
+    inherited_shared_password: Option<OsString>,
 }
 
 #[derive(Deserialize)]
@@ -267,11 +268,19 @@ fn redact_credentials(line: &str) -> String {
     redacted
 }
 
-fn stderr_line(config: &Config, repository: &Repository, bytes: &[u8]) -> String {
+fn stderr_line(
+    config: &Config,
+    repository: &Repository,
+    inherited_password: Option<&OsString>,
+    bytes: &[u8],
+) -> String {
     let mut private_values: Vec<String> = std::env::vars_os()
         .filter(|(name, _)| sensitive_name(&name.to_string_lossy()))
         .map(|(_, value)| value.to_string_lossy().into_owned())
         .collect();
+    if let Some(value) = inherited_password {
+        private_values.push(value.to_string_lossy().into_owned());
+    }
     for repository in [
         repository,
         &config.repositories.shared,
@@ -366,7 +375,12 @@ impl<'a> Restic<'a> {
             executable,
             cache,
             temp,
+            inherited_shared_password: None,
         })
+    }
+
+    pub(crate) fn inherit_shared_password(&mut self, password: OsString) {
+        self.inherited_shared_password = Some(password);
     }
 
     fn output(
@@ -382,8 +396,16 @@ impl<'a> Restic<'a> {
                 command.env(name, value);
             }
         }
+        let repository_password = if repository.url == self.config.repositories.shared.url {
+            self.inherited_shared_password
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(|| password(repository))?
+        } else {
+            password(repository)?
+        };
         command
-            .env("RESTIC_PASSWORD", password(repository)?)
+            .env("RESTIC_PASSWORD", repository_password)
             .env("TMPDIR", &self.temp)
             .env("TMP", &self.temp)
             .env("TEMP", &self.temp)
@@ -460,7 +482,12 @@ impl<'a> Restic<'a> {
             } else {
                 "bot"
             };
-            let diagnostic = stderr_line(self.config, repository, &output.stderr);
+            let diagnostic = stderr_line(
+                self.config,
+                repository,
+                self.inherited_shared_password.as_ref(),
+                &output.stderr,
+            );
             return Err(Error {
                 message: format!(
                     "restic {kind} repository operation failed (exit {code}: {meaning}); no write was replayed; stderr: {diagnostic}"
@@ -471,7 +498,7 @@ impl<'a> Restic<'a> {
         Ok(output.stdout)
     }
 
-    pub fn snapshots(&self, repository: &Repository) -> Result<Vec<Snapshot>> {
+    pub(crate) fn raw_snapshots(&self, repository: &Repository) -> Result<Vec<Snapshot>> {
         let bytes = self.run(
             repository,
             &["snapshots".into(), "--json".into(), "--no-lock".into()],
@@ -482,16 +509,149 @@ impl<'a> Restic<'a> {
         if snapshots.iter().any(|s| !snapshot_id(&s.id)) {
             return Err(Error::new("Invalid restic snapshot identifier"));
         }
-        if snapshots.iter().any(|snapshot| {
-            !snapshot
+        Ok(snapshots)
+    }
+
+    pub fn snapshots(&self, repository: &Repository) -> Result<Vec<Snapshot>> {
+        let snapshots = self.raw_snapshots(repository)?;
+        for snapshot in &snapshots {
+            let legacy_hub = snapshot
                 .tags
                 .iter()
                 .filter_map(|tag| tag.strip_prefix("hub:"))
-                .eq([self.config.hub.as_str()])
-        }) {
-            return Err(Error::new("Snapshot hub does not match configuration"));
+                .eq([self.config.hub.as_str()]);
+            let control = snapshot.tags.iter().any(|tag| tag.starts_with("uah2:"));
+            if control && repository.url == self.config.repositories.shared.url {
+                crate::migration::read_control(self.config, self, snapshot)?;
+            } else if !legacy_hub || control {
+                return Err(Error::new("Snapshot hub does not match configuration"));
+            }
         }
         Ok(snapshots)
+    }
+
+    pub(crate) fn snapshot(&self, repository: &Repository, id: &str) -> Result<Snapshot> {
+        if !snapshot_id(id) {
+            return Err(Error::new("Expected a full snapshot identifier"));
+        }
+        let bytes = self.run(
+            repository,
+            &[
+                "cat".into(),
+                "snapshot".into(),
+                id.into(),
+                "--no-lock".into(),
+            ],
+            None,
+        )?;
+        let mut snapshot: Snapshot = serde_json::from_slice(&bytes)
+            .map_err(|_| Error::new("Invalid restic snapshot object"))?;
+        if !snapshot.id.is_empty() && !snapshot.id.eq_ignore_ascii_case(id) {
+            return Err(Error::new(
+                "Restic snapshot identity does not match request",
+            ));
+        }
+        snapshot.id = id.to_owned();
+        Ok(snapshot)
+    }
+
+    pub(crate) fn format_fence(
+        &self,
+        config_path: &Path,
+        expected_source: &str,
+        config_digest: &str,
+    ) -> Result<String> {
+        let executable = std::env::current_exe()
+            .map_err(|_| Error::new("Cannot locate the migration helper executable"))?;
+        let mut arguments: Vec<OsString> = vec![
+            "backup".into(),
+            "--json".into(),
+            "--host".into(),
+            self.config.id().into(),
+            "--stdin-filename".into(),
+            crate::migration::FENCE_FILE.into(),
+        ];
+        for tag in crate::migration::control_tags(&self.config.hub) {
+            arguments.extend(["--tag".into(), tag.into()]);
+        }
+        arguments.extend([
+            "--stdin-from-command".into(),
+            "--".into(),
+            executable.into_os_string(),
+            crate::migration::HELPER.into(),
+            config_path.as_os_str().to_owned(),
+            expected_source.into(),
+            config_digest.into(),
+        ]);
+        let bytes = self.run(&self.config.repositories.shared, &arguments, None)?;
+        backup_snapshot_id(&bytes)
+    }
+
+    pub fn backup_uncommitted(
+        &self,
+        repository: &Repository,
+        export: &Export,
+        kind: &str,
+    ) -> Result<String> {
+        if !crate::config::identity(kind) || matches!(kind, "shared" | "bot") {
+            return Err(Error::new(
+                "Immutable state requires a distinct snapshot kind",
+            ));
+        }
+        let existing = self.snapshots(repository)?;
+        let run_tag = format!(
+            "run:{}",
+            export
+                .tree
+                .path()
+                .file_name()
+                .expect("temporary export")
+                .to_string_lossy()
+        );
+        if existing
+            .iter()
+            .any(|snapshot| snapshot.tags.contains(&run_tag))
+        {
+            return Err(Error::new(
+                "Backup run already exists; no write was replayed",
+            ));
+        }
+        let tags = [
+            "utsurigi-agent-hub".to_owned(),
+            format!("hub:{}", self.config.hub),
+            format!("bot:{}", self.config.id()),
+            format!("runtime:{}", self.config.runtime_id()),
+            format!("kind:{kind}"),
+            run_tag,
+        ];
+        let mut arguments: Vec<OsString> = vec![
+            "backup".into(),
+            "--json".into(),
+            "--host".into(),
+            self.config.id().into(),
+            "--read-concurrency".into(),
+            self.config.sync.read_concurrency.to_string().into(),
+        ];
+        for tag in &tags {
+            arguments.extend(["--tag".into(), tag.into()]);
+        }
+        arguments.push(".".into());
+        let bytes = self.run(repository, &arguments, Some(export.tree.path()))?;
+        let id = backup_snapshot_id(&bytes)?;
+        if existing
+            .iter()
+            .any(|snapshot| snapshot.id.eq_ignore_ascii_case(&id))
+        {
+            return Err(Error::new("Backup summary identifies an existing snapshot"));
+        }
+        let snapshot = self.snapshot(repository, &id)?;
+        if snapshot.hostname != self.config.id()
+            || snapshot.tags.len() != tags.len()
+            || tags.iter().any(|tag| !snapshot.tags.contains(tag))
+        {
+            return Err(Error::new("Immutable backup does not match this write"));
+        }
+        Ok(id)
     }
 
     pub fn initialize(&self, repository: &Repository) -> Result<()> {

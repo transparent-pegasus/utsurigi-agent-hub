@@ -1,5 +1,6 @@
 use crate::error::{Error, Result};
 use serde::{Deserialize, de::DeserializeOwned};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -32,6 +33,10 @@ pub const STORAGE_CREDENTIAL_ENV: [&str; 3] = [
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    #[serde(skip)]
+    pub source_path: Option<PathBuf>,
+    #[serde(skip)]
+    pub source_digest: Option<String>,
     #[serde(default = "one")]
     pub version: u32,
     #[serde(default = "default_hub")]
@@ -448,6 +453,8 @@ impl Config {
             &bytes,
             "Invalid configuration: unknown key, value, or YAML syntax",
         )?;
+        config.source_path = Some(path.clone());
+        config.source_digest = Some(format!("{:x}", Sha256::digest(&bytes)));
         let base = path
             .parent()
             .ok_or_else(|| Error::new("Invalid configuration path"))?;

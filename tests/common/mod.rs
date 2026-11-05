@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -12,6 +13,8 @@ pub use temp::TempDir;
 pub const SHARED_PASSWORD: &str = "synthetic-SHARED-secret-7f0b";
 pub const BOT_PASSWORD: &str = "synthetic-ALPHA-secret-9c2d";
 pub const PEER_PASSWORD: &str = "synthetic-BETA-secret-3e4a";
+pub const R2_SHARED: &str = "s3:https://compat-acceptance-42.r2.cloudflarestorage.com/fake/shared";
+pub const R2_BOT: &str = "s3:https://compat-acceptance-42.r2.cloudflarestorage.com/fake/alpha";
 pub const PAYLOAD: &[u8] = "日本語の記憶 🐎\nunique-private-payload-9f3b\0tail".as_bytes();
 
 pub const CONNECTION_ENV: [(&str, &str); 11] = [
@@ -166,7 +169,22 @@ impl Fixture {
         Self::make_bot(self.temp.path(), id, runtime)
     }
 
-    pub fn registry(&self, owner: &Bot, bots: &[&Bot]) {
+    pub fn registry(&self, author: &Bot, bots: &[&Bot]) {
+        let registry = json!({
+            "version": 2,
+            "hub": author.config["hub"].as_str().unwrap_or("default"),
+            "max_bots": author.config["budget"]["max_bots"].as_u64().unwrap_or(50),
+            "bots": bots.iter().map(|bot| bot.entry()).collect::<Vec<_>>()
+        });
+        fs::write(
+            author.path("shared").join("registry.yaml"),
+            serde_json::to_vec_pretty(&registry).unwrap(),
+        )
+        .unwrap();
+    }
+
+    // Genuine old-schema fixtures must opt in; v1 still requires its owner row.
+    pub fn legacy_registry(&self, owner: &Bot, bots: &[&Bot]) {
         let registry = json!({
             "version": 1,
             "hub": owner.config["hub"].as_str().unwrap_or("default"),
@@ -204,8 +222,32 @@ impl Fixture {
 
     pub fn cli_command(&self, bot: &Bot, args: &[&str]) -> Command {
         let mut command = self.command(env!("CARGO_BIN_EXE_utsurigi-agent-hub"));
+        let curl_bin = self.temp.path().join("head-curl/bin");
+        if curl_bin.join("curl").is_file() {
+            let path = std::env::join_paths(std::iter::once(curl_bin).chain(
+                std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+            ))
+            .unwrap();
+            command.env("PATH", path);
+        }
         command.arg("--config").arg(&bot.file).args(args);
         command
+    }
+
+    pub fn fake_r2_head(&self, bot: &Bot, local_shared: &str) {
+        let directory = self.temp.path().join("head-curl");
+        let head = Path::new(local_shared).join("uah-head.json");
+        assert!(head.starts_with(self.temp.path()));
+        let executable = directory.join("bin/curl");
+        write(
+            &executable,
+            include_str!("../fixtures/ownerless-compat-curl.py"),
+        );
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
+        write(directory.join("fixture.json"), json!({
+            "url": format!("{}/uah-head.json", bot.repository("shared").strip_prefix("s3:").unwrap()),
+            "head_path": head,
+        }).to_string());
     }
 
     pub fn cli_env(&self, bot: &Bot, args: &[&str], env: &[(&str, &str)]) -> Output {
@@ -301,6 +343,57 @@ impl Fixture {
             .collect()
     }
 
+    pub fn content_snapshots(&self, bot: &Bot, repository: &str) -> Vec<Value> {
+        let kind = if repository == "shared" {
+            "kind:shared-v2"
+        } else {
+            "kind:bot"
+        };
+        let snapshots: Vec<_> = self
+            .snapshots(bot, repository)
+            .into_iter()
+            .filter(|snapshot| snapshot["tags"].as_array().unwrap().contains(&json!(kind)))
+            .collect();
+        assert!(
+            !snapshots.is_empty(),
+            "{repository} must contain an ordinary content snapshot"
+        );
+        snapshots
+    }
+
+    pub fn shared_head(&self, bot: &Bot) -> Value {
+        let path = Path::new(bot.repository("shared")).join("uah-head.json");
+        let head: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(head["version"], 2);
+        assert_eq!(head["hub"], bot.config["hub"].as_str().unwrap_or("default"));
+        assert!(head["revision"].as_u64().is_some_and(|value| value > 0));
+        let id = head["snapshot"].as_str().unwrap();
+        assert_eq!(id.len(), 64);
+        assert!(id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        head
+    }
+
+    pub fn current_shared_id(&self, bot: &Bot) -> String {
+        self.shared_head(bot)["snapshot"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    // Copy the actual accepted authoring base, including its revision metadata.
+    // Generated history remains an output of publication, never an author input.
+    pub fn author_current(&self, bot: &Bot) {
+        let source = self.active_shared(bot);
+        assert_eq!(
+            source.file_name().unwrap().to_str().unwrap(),
+            self.current_shared_id(bot),
+            "refresh the import before copying the accepted authoring base"
+        );
+        fs::remove_dir_all(bot.path("shared")).unwrap();
+        copy_tree(&source, &bot.path("shared"));
+        fs::remove_file(bot.path("shared").join("registry-history.json")).unwrap();
+    }
+
     pub fn wrapper(bot: &mut Bot) -> PathBuf {
         let directory = bot.file.parent().unwrap().join("restic-fixture");
         fs::create_dir_all(&directory).unwrap();
@@ -314,6 +407,140 @@ impl Fixture {
         bot.save();
         directory
     }
+}
+
+// Fresh local hubs have one dedicated control tree, separate from shared-v2 data.
+// Validate its native identity and payload before allowing any reads of it.
+pub fn shared_cache_control(fixture: &Fixture, bot: &Bot) -> String {
+    let snapshots = fixture.snapshots(bot, "shared");
+    let fences: Vec<_> = snapshots
+        .iter()
+        .filter(|snapshot| {
+            snapshot["tags"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("uah2:kind:format-fence"))
+        })
+        .collect();
+    assert_eq!(fences.len(), 1, "fresh fixture must have one format fence");
+    let fence = fences[0];
+    let tags: BTreeSet<_> = fence["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tag| tag.as_str().unwrap().to_owned())
+        .collect();
+    let hub = bot.config["hub"].as_str().unwrap();
+    assert_eq!(
+        tags,
+        BTreeSet::from([
+            "uah2:kind:format-fence".to_owned(),
+            "uah2:format:2".to_owned(),
+            format!("uah2:hub:{hub}"),
+        ])
+    );
+    assert_eq!(fence["tags"].as_array().unwrap().len(), 3);
+    let id = fence["id"].as_str().unwrap();
+    assert_eq!(id.len(), 64);
+    assert!(id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let accepted = fixture.current_shared_id(bot);
+    assert_ne!(accepted, id);
+    let data = snapshots
+        .iter()
+        .find(|snapshot| snapshot["id"] == accepted)
+        .unwrap();
+    assert!(
+        data["tags"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("kind:shared-v2"))
+    );
+    let target = fixture.temp.path().join("cache-control-proof");
+    success(&fixture.restic(
+        bot,
+        "shared",
+        &[
+            "restore",
+            id,
+            "--target",
+            target.to_str().unwrap(),
+            "--verify",
+        ],
+    ));
+    let payload: Value =
+        serde_json::from_slice(&fs::read(target.join("format-fence.json")).unwrap()).unwrap();
+    assert_eq!(
+        payload,
+        json!({
+            "type": "utsurigi-agent-hub/format-fence", "format": 2, "hub": hub,
+            "source": null, "capture": null,
+        })
+    );
+    id.to_owned()
+}
+
+// Account for every restore by exact native ID and repository. Unknown trees,
+// aliases such as latest, and predecessor data cannot hide among control reads.
+pub fn shared_data_restores(
+    bot: &Bot,
+    tool: &Path,
+    control: &str,
+    allowed_data: &[&str],
+) -> Vec<String> {
+    let boundary = fs::read_to_string(tool.join("boundary")).unwrap();
+    let mut restored = Vec::new();
+    for call in boundary.split("__CALL__\n").skip(1) {
+        let args: Vec<_> = call
+            .lines()
+            .filter_map(|line| line.strip_prefix("arg:"))
+            .collect();
+        let Some(index) = args.iter().position(|argument| *argument == "restore") else {
+            continue;
+        };
+        let repository = args
+            .windows(2)
+            .find_map(|pair| (pair[0] == "--repo").then_some(pair[1]));
+        assert_eq!(repository, Some(bot.repository("shared")), "{args:?}");
+        let snapshot = *args
+            .get(index + 1)
+            .expect("restore needs a native snapshot ID");
+        if snapshot != control {
+            assert!(
+                allowed_data.contains(&snapshot),
+                "unexpected data restore {snapshot}: {args:?}"
+            );
+            restored.push(snapshot.to_owned());
+        }
+    }
+    restored
+}
+
+pub fn copy_tree(source: &Path, target: &Path) {
+    fs::create_dir_all(target).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let destination = target.join(entry.file_name());
+        let kind = entry.file_type().unwrap();
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &destination);
+        } else {
+            assert!(
+                kind.is_file(),
+                "test authoring sources must contain regular files"
+            );
+            fs::copy(entry.path(), destination).unwrap();
+        }
+    }
+}
+
+pub fn write_shared_revision(bot: &Bot, tree: &Path, revision: u64) {
+    assert!(revision > 0);
+    write(tree.join("shared-revision.json"), json!({
+        "version": 2,
+        "hub": bot.config["hub"].as_str().unwrap_or("default"),
+        "repository_sha256": format!("{:x}", Sha256::digest(bot.repository("shared").as_bytes())),
+        "revision": revision,
+    }).to_string());
 }
 
 pub fn text(output: &Output) -> String {

@@ -12,7 +12,7 @@ use std::path::Path;
 
 const FILE: &str = "registry-history.json";
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct History {
     version: u32,
@@ -28,6 +28,12 @@ impl History {
             version: 1,
             ..Self::default()
         }
+    }
+
+    pub fn pending_master_bytes(&self, count: u64) -> u64 {
+        // A JSON string ID is 66 bytes, plus one comma except for the first
+        // item in an empty array. New restic master IDs have fixed width.
+        count * 67 - u64::from(count > 0 && self.repository_ids.is_empty())
     }
 
     pub fn load(root: &Path, registry: &Registry) -> Result<Self> {

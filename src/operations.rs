@@ -1,27 +1,83 @@
-use crate::config::{Config, Repository, absolute, no_symlinks};
+use crate::config::{Config, Repository, absolute, identity, no_symlinks};
+use crate::decisions::{self, Decisions};
 use crate::error::{Error, Result};
+use crate::head::{Head, HeadStore, ObservedHead};
 use crate::history::History;
-use crate::registry::Registry;
-use crate::restic::{Restic, Snapshot, latest};
-use crate::selection;
+use crate::registry::{LegacyRegistry, Registry};
+use crate::restic::{Restic, Snapshot, latest, password};
+use crate::selection::{self, Export};
 use crate::shared::{self, SharedCache};
-use crate::state::{Lock, State, fresh_destination, private_dir};
-use crate::{Action, RegistryAction, RepositoryKind, budget};
+use crate::state::{Failure, Lock, State, fresh_destination, private_dir, private_file};
+use crate::{Action, RegistryAction, RepositoryKind, budget, migration};
 use chrono::{DateTime, Datelike, SecondsFormat, Utc};
-use std::fs;
+use serde::{Deserialize, Serialize};
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::Path;
 use utsurigi_agent_hub::{retention, schedule};
 
-struct Imported {
+const REVISION_FILE: &str = "shared-revision.json";
+const CAS_ATTEMPTS: usize = 16;
+
+#[derive(Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct Revision {
+    version: u32,
+    hub: String,
+    repository_sha256: String,
+    revision: u64,
+}
+
+impl Revision {
+    fn new(config: &Config, revision: u64) -> Self {
+        Self {
+            version: 2,
+            hub: config.hub.clone(),
+            repository_sha256: decisions::repository_sha256(config),
+            revision,
+        }
+    }
+
+    fn load(root: &Path, config: &Config) -> Result<Self> {
+        let path = root.join(REVISION_FILE);
+        no_symlinks(&path)?;
+        let invalid = || {
+            Error::new(
+                "Missing or invalid authoring revision base; copy verified active_shared, omit generated registry-history.json, and reconcile edits before publishing",
+            )
+        };
+        let bytes = fs::read(path).map_err(|_| invalid())?;
+        let revision: Self = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+        if revision.revision == 0 || revision != Self::new(config, revision.revision) {
+            return Err(invalid());
+        }
+        Ok(revision)
+    }
+
+    fn write(&self, export: &mut Export) -> Result<()> {
+        export.write(
+            REVISION_FILE,
+            &serde_json::to_vec(self)
+                .map_err(|_| Error::new("Cannot encode shared revision base"))?,
+        )
+    }
+}
+
+struct Prepared {
     registry: Registry,
     history: History,
-    snapshot: String,
+    export: Export,
+}
+
+struct Imported {
+    data: Prepared,
+    observed: ObservedHead,
     cache: SharedCache,
 }
 
 impl Imported {
     fn publish(self) -> Result<()> {
-        self.cache.publish(&self.snapshot)
+        self.cache.publish(&self.observed.head.snapshot)
     }
 }
 
@@ -41,10 +97,21 @@ pub fn execute(path: &Path, action: Action) -> Result<()> {
         Action::Status => return status(&config),
         _ => (),
     }
-    config.runtime()?;
-    let root = config.paths.state.as_ref().expect("runtime configuration");
+    let operation = match &action {
+        Action::Setup => "setup",
+        Action::Sync { .. } => "sync",
+        Action::Registry { .. } => "publish",
+        Action::Pull { .. } => "pull",
+        Action::Restore { .. } => "restore",
+        Action::Prune => "prune",
+        _ => unreachable!(),
+    };
+    let Some(root) = config.paths.state.as_ref() else {
+        return config.runtime();
+    };
     let _lock = Lock::acquire(root)?;
     let mut state = State::load(root, &config.hub)?;
+    // A skipped scheduled operation must leave every unresolved failure intact.
     if matches!(action, Action::Sync { scheduled: true })
         && state
             .next_due
@@ -53,38 +120,53 @@ pub fn execute(path: &Path, action: Action) -> Result<()> {
         println!("{}", serde_json::json!({"skipped": true}));
         return Ok(());
     }
-    private_dir(
-        config
-            .paths
-            .imports
-            .as_ref()
-            .expect("runtime configuration"),
-    )?;
-    let restic = Restic::open(&config, matches!(action, Action::Setup))?;
-    match action {
-        Action::Setup => setup(&config, &restic, &mut state)?,
-        Action::Sync { scheduled } => sync(&config, &restic, &mut state, scheduled)?,
-        Action::Registry {
-            command: RegistryAction::Publish { takeover },
-        } => publish(&config, &restic, takeover)?,
-        Action::Pull {
-            bot_id,
-            destination,
-        } => pull(&config, &restic, &bot_id, &destination)?,
-        Action::Restore {
-            repository,
-            snapshot,
-            destination,
-        } => {
-            let repository = match repository {
-                RepositoryKind::Shared => &config.repositories.shared,
-                RepositoryKind::Bot => &config.repositories.bot,
-            };
-            recover(&config, &restic, repository, &snapshot, &destination)?;
+    let previous = state.clone();
+    let result = (|| {
+        config.runtime()?;
+        private_dir(
+            config
+                .paths
+                .imports
+                .as_ref()
+                .expect("runtime configuration"),
+        )?;
+        let restic = Restic::open(&config, matches!(action, Action::Setup))?;
+        match action {
+            Action::Setup => setup(&config, &restic, &mut state),
+            Action::Sync { scheduled } => sync(&config, &restic, &mut state, scheduled),
+            Action::Registry {
+                command: RegistryAction::Publish { takeover },
+            } => publish(&config, &restic, takeover),
+            Action::Pull {
+                bot_id,
+                destination,
+            } => pull(&config, &restic, &bot_id, &destination),
+            Action::Restore {
+                repository,
+                snapshot,
+                destination,
+            } => {
+                let repository = match repository {
+                    RepositoryKind::Shared => &config.repositories.shared,
+                    RepositoryKind::Bot => &config.repositories.bot,
+                };
+                recover(&config, &restic, repository, &snapshot, &destination)
+            }
+            Action::Prune => prune(&config, &restic),
+            Action::Validate { .. } | Action::Status => unreachable!(),
         }
-        Action::Prune => prune(&config, &restic)?,
-        Action::Validate { .. } | Action::Status => unreachable!(),
+    })();
+    if let Err(error) = result {
+        state = previous;
+        state
+            .failures
+            .insert(operation.to_owned(), Failure::sanitized(operation, &error));
+        // Preserve the original error if recording status itself fails.
+        let _ = state.save(root);
+        return Err(error);
     }
+    state.failures.remove(operation);
+    state.save(root)?;
     println!("Operation completed");
     Ok(())
 }
@@ -108,6 +190,12 @@ fn status(config: &Config) -> Result<()> {
     };
     let missing = config.missing();
     let active_shared = shared::active(config)?;
+    let failure = state.failures.get("setup").or_else(|| {
+        state
+            .failures
+            .values()
+            .max_by_key(|failure| failure.recorded_at)
+    });
     let (next_action, remediation) = if !missing.is_empty() {
         (
             "configure",
@@ -116,15 +204,22 @@ fn status(config: &Config) -> Result<()> {
                 .map(|field| format!("Set {field} in configuration"))
                 .collect::<Vec<_>>(),
         )
-    } else if state.anchor.is_none() || state.next_due.is_none() {
+    } else if let Some(failure) = failure {
+        (
+            failure.operation.as_str(),
+            vec![failure.reason.clone(), failure.next_action.clone()],
+        )
+    } else if !state.joined || state.anchor.is_none() || state.next_due.is_none() {
         (
             "setup",
-            vec!["Run setup to initialize shared files and the schedule".to_owned()],
+            vec![
+                "Run setup to register with the shared hub and initialize the schedule".to_owned(),
+            ],
         )
     } else if active_shared.is_none() {
         (
             "sync",
-            vec!["Run sync to migrate the initialized schedule to the shared cache".to_owned()],
+            vec!["Run sync to restore the accepted shared head into the shared cache".to_owned()],
         )
     } else if state
         .next_due
@@ -137,44 +232,77 @@ fn status(config: &Config) -> Result<()> {
     println!(
         "{}",
         serde_json::json!({
-            "hub": config.hub,
-            "ready": missing.is_empty(), "last_success": status_time(state.last_success)?,
-            "anchor": status_time(state.anchor)?, "next_due": status_time(state.next_due)?, "active_shared": active_shared,
-            "next_action": next_action, "remediation": remediation,
+            "hub": config.hub, "ready": missing.is_empty(), "joined": state.joined,
+            "last_success": status_time(state.last_success)?, "anchor": status_time(state.anchor)?,
+            "next_due": status_time(state.next_due)?, "active_shared": active_shared,
+            "failure": failure, "next_action": next_action, "remediation": remediation,
         })
     );
     Ok(())
 }
 
+fn tag<'a>(snapshot: &'a Snapshot, prefix: &str) -> Option<&'a str> {
+    let mut values = snapshot
+        .tags
+        .iter()
+        .filter_map(|tag| tag.strip_prefix(prefix));
+    let value = values.next()?;
+    values.next().is_none().then_some(value)
+}
+
 fn import_shared(config: &Config, restic: &Restic<'_>) -> Result<Imported> {
+    password(&config.repositories.shared)?;
     let cache = SharedCache::open(config)?;
-    let snapshots = restic.snapshots(&config.repositories.shared)?;
-    let snapshot = latest(&snapshots, "shared").ok_or_else(|| {
-        Error::new("No complete shared registry exists; setup by its owner is required")
+    let observed = HeadStore::new(config)?.read()?.ok_or_else(|| {
+        Error::new("No accepted shared head exists; run setup to initialize or migrate the hub")
     })?;
-    let (registry, history) = cache.load(
+    // Inventory validation still rejects foreign data and malformed controls.
+    // Only the exact head target can become current; candidates and v1 latest cannot.
+    let snapshots = restic.snapshots(&config.repositories.shared)?;
+    let snapshot = snapshots
+        .iter()
+        .find(|snapshot| snapshot.id == observed.head.snapshot)
+        .ok_or_else(|| {
+            Error::new("Accepted shared head snapshot is missing; explicit recovery is required")
+        })?;
+    if !snapshot.kind("shared-v2")
+        || snapshot.tags.len() != 6
+        || tag(snapshot, "hub:") != Some(config.hub.as_str())
+        || tag(snapshot, "bot:") != Some(snapshot.hostname.as_str())
+        || !identity(&snapshot.hostname)
+        || !tag(snapshot, "runtime:").is_some_and(identity)
+        || !tag(snapshot, "run:").is_some_and(identity)
+        || tag(snapshot, "kind:") != Some("shared-v2")
+        || DateTime::parse_from_rfc3339(&snapshot.time).is_err()
+    {
+        return Err(Error::new(
+            "Accepted shared snapshot source identity is invalid",
+        ));
+    }
+    let data = cache.load(
         &snapshot.id,
         |path| restic.restore(&config.repositories.shared, &snapshot.id, path),
         |path| {
             selection::validate_import(path)?;
             let registry = Registry::load(path, config)?;
-            if !snapshot.owned_by(&registry.owner.bot_id, "shared")
-                || !snapshot
-                    .tags
-                    .contains(&format!("runtime:{}", registry.owner.runtime_id))
-            {
+            let history = History::load(path, &registry)?;
+            Decisions::load(path, config)?;
+            if Revision::load(path, config)?.revision != observed.head.revision {
                 return Err(Error::new(
-                    "Shared snapshot ownership does not match its registry",
+                    "Shared snapshot revision does not match its accepted head",
                 ));
             }
-            let history = History::load(path, &registry)?;
-            Ok((registry, history))
+            let export = selection::copy_verified(config, path)?;
+            Ok(Prepared {
+                registry,
+                history,
+                export,
+            })
         },
     )?;
     Ok(Imported {
-        registry,
-        history,
-        snapshot: snapshot.id.clone(),
+        data,
+        observed,
         cache,
     })
 }
@@ -198,9 +326,14 @@ fn initialize_schedule(config: &Config, state: &mut State) -> Result<()> {
 fn private_repository(config: &Config, restic: &Restic<'_>, history: &History) -> Result<()> {
     if !config.sharing.bot_data {
         history.check_private(&config.repositories.bot, restic)?;
-        if restic.repository_id(&config.repositories.bot)?
-            == restic.repository_id(&config.repositories.shared)?
-        {
+        let existing_id = |repository| match restic.repository_id(repository) {
+            Ok(id) => Ok(Some(id)),
+            Err(error) if error.code == 10 => Ok(None),
+            Err(error) => Err(error),
+        };
+        let own = existing_id(&config.repositories.bot)?;
+        let shared = existing_id(&config.repositories.shared)?;
+        if own.is_some() && own == shared {
             return Err(Error::new(
                 "Private Bot data requires a separate repository and master key",
             ));
@@ -209,64 +342,10 @@ fn private_repository(config: &Config, restic: &Restic<'_>, history: &History) -
     Ok(())
 }
 
-fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> {
-    // Reject unsafe owned selections before publishing the initial shared tree.
-    drop(selection::export(config, false)?);
-    let snapshots = match restic.snapshots(&config.repositories.shared) {
-        Ok(snapshots) => snapshots,
-        Err(error) if error.code == 10 => Vec::new(),
-        Err(error) => return Err(error),
-    };
-    let imported = if latest(&snapshots, "shared").is_none() {
-        let registry = Registry::load(
-            config.paths.shared.as_ref().expect("runtime configuration"),
-            config,
-        )?;
-        if !registry.is_owner(config) {
-            return Err(Error::new(
-                "Only the initial registry owner can initialize shared storage",
-            ));
-        }
-        registry.current(config)?;
-        registry.credentials(config)?;
-        if snapshots.iter().any(|snapshot| {
-            !snapshot.owned_by(config.id(), "shared")
-                || !snapshot
-                    .tags
-                    .iter()
-                    .filter_map(|tag| tag.strip_prefix("bot:"))
-                    .eq([config.id()])
-                || !snapshot
-                    .tags
-                    .iter()
-                    .filter_map(|tag| tag.strip_prefix("runtime:"))
-                    .eq([config.runtime_id()])
-                || !snapshot
-                    .tags
-                    .iter()
-                    .filter_map(|tag| tag.strip_prefix("kind:"))
-                    .eq(["shared"])
-                || snapshot
-                    .tags
-                    .iter()
-                    .any(|tag| tag.starts_with("completed:"))
-        }) {
-            return Err(Error::new(
-                "Shared repository has uncertain history; explicit recovery is required",
-            ));
-        }
-        // Reject a Bot repository from another hub before initializing either repository.
-        match restic.snapshots(&config.repositories.bot) {
-            Ok(_) => (),
-            Err(error) if error.code == 10 => (),
-            Err(error) => return Err(error),
-        }
-        let mut history = History::new();
-        history.observe(&registry, config, restic, true)?;
-        history.check(&registry, restic)?;
-        let mut export = selection::export(config, true)?;
-        history.write(&mut export)?;
-        let repositories = &[
+fn shared_budget(config: &Config, bytes: u64) -> Result<()> {
+    budget::authorize(
+        config,
+        &[
             config
                 .repositories
                 .shared
@@ -279,70 +358,289 @@ fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> 
                 .url
                 .as_deref()
                 .expect("runtime configuration"),
-        ];
-        budget::authorize(config, repositories, export.bytes)?;
-        restic.initialize(&config.repositories.shared)?;
-        restic.initialize(&config.repositories.bot)?;
-        history.observe(&registry, config, restic, true)?;
-        private_repository(config, restic, &history)?;
-        // Initialization can add master IDs; include their bytes before authorizing backup.
-        drop(export);
-        let mut export = selection::export(config, true)?;
-        history.write(&mut export)?;
-        budget::authorize(config, repositories, export.bytes)?;
-        restic.backup(&config.repositories.shared, &export, "shared")?;
-        let imported = import_shared(config, restic)?;
-        imported.registry.current(config)?;
-        imported.registry.credentials(config)?;
-        imported.history.check(&imported.registry, restic)?;
-        private_repository(config, restic, &imported.history)?;
-        imported
-    } else {
-        let mut imported = import_shared(config, restic)?;
-        imported.registry.current_runtime(config)?;
-        if imported.registry.current(config).is_err() {
-            if !imported.registry.is_owner(config) {
-                return Err(Error::new(
-                    "Joining Bots may initialize only their registered repository",
-                ));
-            }
-            let candidate = Registry::load(
-                config.paths.shared.as_ref().expect("runtime configuration"),
-                config,
-            )?;
-            if !candidate.is_owner(config) {
-                return Err(Error::new(
-                    "Repository changes require the current owner's local registry",
-                ));
-            }
-            candidate.current(config)?;
-            candidate.transition_from(&imported.registry, config, restic)?;
-            imported
-                .history
-                .observe(&imported.registry, config, restic, false)?;
-            imported.history.observe(&candidate, config, restic, true)?;
-            imported.history.check(&candidate, restic)?;
-        } else {
-            imported.registry.credentials(config)?;
-            imported.history.check(&imported.registry, restic)?;
+        ],
+        bytes,
+    )
+}
+
+fn rewrite_metadata(config: &Config, data: &mut Prepared, revision: u64) -> Result<()> {
+    data.registry.write(&mut data.export)?;
+    data.export.remove("registry-history.json")?;
+    data.history.write(&mut data.export)?;
+    Revision::new(config, revision).write(&mut data.export)
+}
+
+// This callback is also run on the retained capture after a durable-fence restart.
+// Its complete candidate and byte budget are checked before the fence is written.
+fn prepare_initial(
+    config: &Config,
+    restic: &Restic<'_>,
+    source: Option<&Path>,
+    legacy_retry: bool,
+) -> Result<Prepared> {
+    let mut data = if let Some(source) = source {
+        let registry = LegacyRegistry::load(source, config)?.convert(config)?;
+        let history = History::load(source, &registry)?;
+        let mut export = selection::copy_verified(config, source)?;
+        decisions::supplement(&mut export, config)?;
+        Prepared {
+            registry,
+            history,
+            export,
         }
-        budget::authorize(
-            config,
-            &[config
+    } else {
+        let root = config.paths.shared.as_ref().expect("runtime configuration");
+        let registry = Registry::initial(root, config, legacy_retry)?;
+        Decisions::load(root, config)?;
+        let export = selection::export(config, true)?;
+        if export
+            .tree
+            .path()
+            .join("registry-history.json")
+            .try_exists()?
+        {
+            return Err(Error::new(
+                "registry-history.json is reserved generated shared metadata",
+            ));
+        }
+        Prepared {
+            registry,
+            history: History::new(),
+            export,
+        }
+    };
+    Decisions::load(data.export.tree.path(), config)?;
+    data.registry.register(config)?;
+    data.registry.credentials(config)?;
+    data.history.observe(&data.registry, config, restic, true)?;
+    data.history.check(&data.registry, restic)?;
+    private_repository(config, restic, &data.history)?;
+    rewrite_metadata(config, &mut data, 1)?;
+    // Reserve the fixed-width master IDs of repositories that setup is about to
+    // initialize. The callback after ensure's initialization uses actual IDs.
+    let mut pending_ids = 0u64;
+    for repository in std::iter::once(&config.repositories.shared)
+        .chain(config.sharing.bot_data.then_some(&config.repositories.bot))
+    {
+        match restic.repository_id(repository) {
+            Err(error) if error.code == 10 => pending_ids += 1,
+            Err(error) => return Err(error),
+            Ok(_) => (),
+        }
+    }
+    shared_budget(
+        config,
+        data.export
+            .bytes
+            .checked_add(data.history.pending_master_bytes(pending_ids))
+            .ok_or_else(|| Error::new("Source size overflow"))?,
+    )?;
+    Ok(data)
+}
+
+fn write_authoring(config: &Config, name: &str, bytes: &[u8]) -> Result<()> {
+    let root = config.paths.shared.as_ref().expect("runtime configuration");
+    no_symlinks(root)?;
+    let path = root.join(name);
+    no_symlinks(&path)?;
+    let mut temp = tempfile::NamedTempFile::new_in(root)?;
+    private_file(temp.as_file())?;
+    temp.write_all(bytes)?;
+    temp.flush()?;
+    temp.as_file().sync_all()?;
+    temp.persist(path).map_err(|_| {
+        Error::new(
+            "Cannot refresh authoring metadata; preserve edits and copy the accepted current base",
+        )
+    })?;
+    File::open(root)?.sync_all()?;
+    Ok(())
+}
+
+fn commit_candidate(
+    config: &Config,
+    restic: &Restic<'_>,
+    store: &HeadStore,
+    expected: Option<&ObservedHead>,
+    data: &Prepared,
+) -> Result<bool> {
+    let revision = expected
+        .map_or(Some(1), |head| head.head.revision.checked_add(1))
+        .ok_or_else(|| Error::new("Shared revision overflow"))?;
+    let snapshot =
+        restic.backup_uncommitted(&config.repositories.shared, &data.export, "shared-v2")?;
+    store.compare_exchange(
+        expected,
+        &Head {
+            version: 2,
+            hub: config.hub.clone(),
+            revision,
+            snapshot,
+        },
+    )
+}
+
+fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> {
+    password(&config.repositories.shared)?;
+    password(&config.repositories.bot)?;
+    let owned = selection::export(config, false)?;
+    budget::authorize(
+        config,
+        &[config
+            .repositories
+            .bot
+            .url
+            .as_deref()
+            .expect("runtime configuration")],
+        owned.bytes,
+    )?;
+    drop(owned);
+    let snapshots = match restic.snapshots(&config.repositories.shared) {
+        Ok(snapshots) => Some(snapshots),
+        Err(error) if error.code == 10 => None,
+        Err(error) => return Err(error),
+    };
+    let store = HeadStore::new(config)?;
+    let can_read_head = config.storage.provider != "local"
+        || Path::new(
+            config
                 .repositories
-                .bot
+                .shared
                 .url
                 .as_deref()
-                .expect("runtime configuration")],
-            0,
-        )?;
-        restic.initialize(&config.repositories.bot)?;
-        private_repository(config, restic, &imported.history)?;
+                .expect("runtime configuration"),
+        )
+        .try_exists()?;
+    let head = if can_read_head { store.read()? } else { None };
+    if head.is_none() {
+        let legacy_retry = snapshots.as_ref().is_some_and(|snapshots| {
+            latest(snapshots, "shared").is_none()
+                && !snapshots
+                    .iter()
+                    .any(|snapshot| snapshot.tags.iter().any(|tag| tag.starts_with("uah2:")))
+                && snapshots.iter().any(|snapshot| snapshot.kind("shared"))
+        });
+        // Validate the entire local initial input before ensure can initialize or
+        // fence an empty repository. Legacy/capture input is checked by callback.
+        if snapshots.as_ref().is_none_or(|snapshots| {
+            latest(snapshots, "shared").is_none()
+                && !snapshots
+                    .iter()
+                    .any(|snapshot| snapshot.tags.iter().any(|tag| tag.starts_with("uah2:")))
+        }) {
+            drop(prepare_initial(config, restic, None, legacy_retry)?);
+        }
+        let mut prepared = None;
+        let mut fence = None;
+        for _ in 0..CAS_ATTEMPTS {
+            let result = migration::ensure(config, restic, &mut |source| {
+                let mut data = prepare_initial(config, restic, source, legacy_retry)?;
+                restic.initialize(&config.repositories.bot)?;
+                data.history.observe(&data.registry, config, restic, true)?;
+                data.history.check(&data.registry, restic)?;
+                private_repository(config, restic, &data.history)?;
+                rewrite_metadata(config, &mut data, 1)?;
+                shared_budget(config, data.export.bytes)?;
+                prepared = Some(data);
+                Ok(())
+            });
+            match result {
+                Ok(value) => {
+                    fence = Some(value);
+                    break;
+                }
+                Err(error)
+                    if error.message.contains("source changed")
+                        || error
+                            .message
+                            .contains("repository changed before initial migration") =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let fence =
+            fence.ok_or_else(|| Error::new("Migration source changed repeatedly; retry setup"))?;
+        let data =
+            prepared.ok_or_else(|| Error::new("Migration candidate preflight did not complete"))?;
+        if commit_candidate(config, restic, &store, None, &data)? {
+            // Only the successful initial author's content receives this base.
+            // A joiner or a losing initializer never relabels local content.
+            if fence.source.is_none() {
+                write_authoring(
+                    config,
+                    "registry.yaml",
+                    &fs::read(data.export.tree.path().join("registry.yaml"))?,
+                )?;
+                write_authoring(
+                    config,
+                    REVISION_FILE,
+                    &fs::read(data.export.tree.path().join(REVISION_FILE))?,
+                )?;
+            }
+        }
+    }
+    for _ in 0..CAS_ATTEMPTS {
+        let mut imported = import_shared(config, restic)?;
+        let changed = imported.data.registry.register(config)?;
+        imported.data.registry.credentials(config)?;
         imported
-    };
-    initialize_schedule(config, state)?;
-    imported.publish()?;
-    state.save(config.paths.state.as_ref().expect("runtime configuration"))
+            .data
+            .history
+            .check(&imported.data.registry, restic)?;
+        private_repository(config, restic, &imported.data.history)?;
+        // No Bot repository is initialized until current identity/history checks
+        // and the prospective shared candidate budget have all passed.
+        let previous_history = imported.data.history.clone();
+        imported
+            .data
+            .history
+            .observe(&imported.data.registry, config, restic, true)?;
+        let revision = imported
+            .observed
+            .head
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| Error::new("Shared revision overflow"))?;
+        if changed || previous_history != imported.data.history {
+            rewrite_metadata(config, &mut imported.data, revision)?;
+            shared_budget(config, imported.data.export.bytes)?;
+        }
+        restic.initialize(&config.repositories.bot)?;
+        imported
+            .data
+            .history
+            .observe(&imported.data.registry, config, restic, true)?;
+        imported
+            .data
+            .history
+            .check(&imported.data.registry, restic)?;
+        private_repository(config, restic, &imported.data.history)?;
+        let history_changed = previous_history != imported.data.history;
+        if changed || history_changed {
+            rewrite_metadata(config, &mut imported.data, revision)?;
+            shared_budget(config, imported.data.export.bytes)?;
+            if !commit_candidate(
+                config,
+                restic,
+                &store,
+                Some(&imported.observed),
+                &imported.data,
+            )? {
+                continue;
+            }
+            imported = import_shared(config, restic)?;
+            imported.data.registry.current(config)?;
+        }
+        initialize_schedule(config, state)?;
+        imported.publish()?;
+        state.joined = true;
+        return Ok(());
+    }
+    Err(Error::new(
+        "Shared registration remained in conflict; retry setup; local work was preserved",
+    ))
 }
 
 fn sync(config: &Config, restic: &Restic<'_>, state: &mut State, scheduled: bool) -> Result<()> {
@@ -353,9 +651,13 @@ fn sync(config: &Config, restic: &Restic<'_>, state: &mut State, scheduled: bool
         return Err(Error::new("Run setup to initialize the schedule"));
     }
     let imported = import_shared(config, restic)?;
-    imported.registry.current(config)?;
-    imported.registry.credentials(config)?;
-    private_repository(config, restic, &imported.history)?;
+    imported.data.registry.current(config)?;
+    imported.data.registry.credentials(config)?;
+    imported
+        .data
+        .history
+        .check(&imported.data.registry, restic)?;
+    private_repository(config, restic, &imported.data.history)?;
     let export = selection::export(config, false)?;
     budget::authorize(
         config,
@@ -378,35 +680,55 @@ fn sync(config: &Config, restic: &Restic<'_>, state: &mut State, scheduled: bool
         )?);
     }
     imported.publish()?;
-    state.save(config.paths.state.as_ref().expect("runtime configuration"))
+    state.joined = true;
+    Ok(())
 }
 
 fn publish(config: &Config, restic: &Restic<'_>, takeover: bool) -> Result<()> {
-    let candidate = Registry::load(
-        config.paths.shared.as_ref().expect("runtime configuration"),
-        config,
-    )?;
-    if !candidate.is_owner(config) {
-        return Err(Error::new(
-            "Only the candidate registry owner can publish shared knowledge",
-        ));
-    }
-    candidate.current(config)?;
-    let mut imported = import_shared(config, restic)?;
-    if !imported.registry.is_owner(config) && !takeover {
-        return Err(Error::new(
-            "Current ownership differs; explicit user-directed --takeover is required after stopping the prior runtime",
-        ));
-    }
-    candidate.transition_from(&imported.registry, config, restic)?;
-    imported
-        .history
-        .observe(&imported.registry, config, restic, false)?;
-    imported.history.observe(&candidate, config, restic, true)?;
-    imported.history.check(&candidate, restic)?;
-    private_repository(config, restic, &imported.history)?;
     let mut export = selection::export(config, true)?;
-    imported.history.write(&mut export)?;
+    let base = Revision::load(export.tree.path(), config)?;
+    let mut imported = import_shared(config, restic)?;
+    if base.revision != imported.observed.head.revision {
+        return Err(Error::new(
+            "Stale authoring revision base; copy verified active_shared, omit generated registry-history.json, and reconcile edits before publishing; local work was preserved",
+        ));
+    }
+    let candidate = Registry::load(export.tree.path(), config)?;
+    Decisions::load(export.tree.path(), config)?;
+    if !takeover
+        && candidate.bots.iter().any(|entry| {
+            imported
+                .data
+                .registry
+                .bots
+                .iter()
+                .any(|old| old.id == entry.id && old.runtime_id != entry.runtime_id)
+        })
+    {
+        return Err(Error::new(
+            "Runtime change requires explicit --takeover acknowledgement; local work was preserved",
+        ));
+    }
+    candidate.transition_from(&imported.data.registry, config, restic)?;
+    imported
+        .data
+        .history
+        .observe(&imported.data.registry, config, restic, false)?;
+    imported
+        .data
+        .history
+        .observe(&candidate, config, restic, true)?;
+    imported.data.history.check(&candidate, restic)?;
+    // The authoring input must omit this reserved generated file. Only the
+    // accepted current snapshot supplies cumulative identifier history.
+    imported.data.history.write(&mut export)?;
+    let revision = imported
+        .observed
+        .head
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| Error::new("Shared revision overflow"))?;
+    Revision::new(config, revision).write(&mut export)?;
     budget::authorize(
         config,
         &[config
@@ -417,8 +739,28 @@ fn publish(config: &Config, restic: &Restic<'_>, takeover: bool) -> Result<()> {
             .expect("runtime configuration")],
         export.bytes,
     )?;
-    restic.backup(&config.repositories.shared, &export, "shared")?;
-    Ok(())
+    let data = Prepared {
+        registry: candidate,
+        history: imported.data.history,
+        export,
+    };
+    if !commit_candidate(
+        config,
+        restic,
+        &HeadStore::new(config)?,
+        Some(&imported.observed),
+        &data,
+    )? {
+        return Err(Error::new(
+            "Shared publication lost a head conflict; reconcile edits with the current authoring base and explicitly publish again; local work was preserved",
+        ));
+    }
+    write_authoring(
+        config,
+        REVISION_FILE,
+        &fs::read(data.export.tree.path().join(REVISION_FILE))?,
+    )?;
+    import_shared(config, restic)?.publish()
 }
 
 fn destination(config: &Config, path: &Path) -> Result<std::path::PathBuf> {
@@ -498,61 +840,67 @@ fn recover(
 fn pull(config: &Config, restic: &Restic<'_>, id: &str, path: &Path) -> Result<()> {
     destination(config, path)?;
     let imported = import_shared(config, restic)?;
-    imported.registry.current(config)?;
-    imported.registry.credentials(config)?;
-    let peer = imported.registry.entry(id)?;
-    if !peer.shared {
-        return Err(Error::new(
-            "Peer sharing is disabled; separate repository and password access is required",
-        ));
-    }
+    imported.data.registry.access_checks(config)?;
+    imported
+        .data
+        .history
+        .check(&imported.data.registry, restic)?;
+    let peer = imported.data.registry.entry(id)?;
     let repository = peer.repository();
+    password(&repository)?;
     let snapshots: Vec<_> = restic
         .snapshots(&repository)?
         .into_iter()
-        .filter(|s| s.owned_by(id, "bot"))
+        .filter(|snapshot| {
+            snapshot.owned_by(id, "bot")
+                && tag(snapshot, "bot:") == Some(id)
+                && tag(snapshot, "runtime:") == Some(peer.runtime_id.as_str())
+                && tag(snapshot, "kind:") == Some("bot")
+        })
         .collect();
-    let snapshot = latest(&snapshots, "bot")
-        .ok_or_else(|| Error::new("No complete peer snapshot is available"))?;
+    let snapshot = latest(&snapshots, "bot").ok_or_else(|| {
+        Error::new("No complete peer snapshot matches the current Bot/runtime source identity")
+    })?;
     recover(config, restic, &repository, &snapshot.id, path)
 }
 
 fn prune(config: &Config, restic: &Restic<'_>) -> Result<()> {
     let imported = import_shared(config, restic)?;
-    imported.registry.current(config)?;
-    imported.registry.credentials(config)?;
-    let mut repositories = vec![(&config.repositories.bot, "bot")];
-    if imported.registry.is_owner(config) {
-        repositories.push((&config.repositories.shared, "shared"));
-    }
-    for (repository, kind) in repositories {
-        let snapshots: Vec<Snapshot> = restic
-            .snapshots(repository)?
-            .into_iter()
-            .filter(|s| s.owned_by(config.id(), kind))
-            .collect();
-        let versions: Vec<_> = snapshots
-            .iter()
-            .map(|snapshot| retention::Version {
-                id: snapshot.id.clone(),
-                completed_at: snapshot.completed_at(),
-            })
-            .collect();
-        let ids = retention::expired(
-            &versions,
-            Utc::now().timestamp(),
-            config.sync.history_retention_seconds,
-        );
-        if !ids.is_empty() {
-            budget::authorize(
-                config,
-                &[repository.url.as_deref().expect("runtime configuration")],
-                0,
-            )?;
-            let mut args: Vec<std::ffi::OsString> = vec!["forget".into(), "--prune".into()];
-            args.extend(ids.into_iter().map(std::ffi::OsString::from));
-            restic.run(repository, &args, None)?;
-        }
+    imported.data.registry.access_checks(config)?;
+    imported
+        .data
+        .history
+        .check(&imported.data.registry, restic)?;
+    // All shared controls, captures, accepted states and losing candidates are
+    // retained in this version. Bot repository retention keeps its existing rule.
+    let repository = &config.repositories.bot;
+    password(repository)?;
+    let snapshots: Vec<Snapshot> = restic
+        .snapshots(repository)?
+        .into_iter()
+        .filter(|snapshot| snapshot.owned_by(config.id(), "bot"))
+        .collect();
+    let versions: Vec<_> = snapshots
+        .iter()
+        .map(|snapshot| retention::Version {
+            id: snapshot.id.clone(),
+            completed_at: snapshot.completed_at(),
+        })
+        .collect();
+    let ids = retention::expired(
+        &versions,
+        Utc::now().timestamp(),
+        config.sync.history_retention_seconds,
+    );
+    if !ids.is_empty() {
+        budget::authorize(
+            config,
+            &[repository.url.as_deref().expect("runtime configuration")],
+            0,
+        )?;
+        let mut args: Vec<std::ffi::OsString> = vec!["forget".into(), "--prune".into()];
+        args.extend(ids.into_iter().map(std::ffi::OsString::from));
+        restic.run(repository, &args, None)?;
     }
     Ok(())
 }

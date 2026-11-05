@@ -43,18 +43,20 @@ never delete arbitrary imports in bulk.
 
 ## Restore and handover
 
-Before handover, preserve unfinished work and stop the old runtime. The owner
-updates Bot runtime identities in the registry. For the registry owner's own
-handover, the new runtime publishes with user-directed
+Before handover, preserve unfinished work and stop the old runtime. Update Bot
+runtime identities using the current shared authoring base and shared credentials.
+For an existing Bot's repository change, publish the updated registry entry before
+running `setup` at the replacement repository.
+For its own handover, the new runtime publishes with user-directed
 `registry publish --takeover` after confirmation that the old runtime stopped.
 Lost-runtime takeover also requires an explicit user decision; absence is not
 consent. A returning superseded runtime keeps its local work for reconciliation.
 
-`sharing.bot_data` controls peer access only within the selected hub. Each private
+`sharing.bot_data` records sharing intent; credentials determine access. Each private
 Bot needs its own repository, password, environment name, and vault permissions.
 Disabling prior sharing also needs a new repository/master key; a password change cannot revoke
 the old key or erase what peers already read. Rotation checks may require the
-owner to receive the affected old and new passwords through authorized secure
+publishing Bot to receive the affected old and new passwords through authorized secure
 injection. Keep old recovery credentials for retained history.
 
 Never reuse retired shared URLs, passwords, references/vault items, environment
@@ -63,25 +65,25 @@ by `setup`. Every complete encrypted shared snapshot carries cumulative shared
 URLs, password references/environment names and observed restic repository IDs in
 CLI-generated `registry-history.json`. This root filename is reserved: keep it out
 of the authoring tree. Identifiers persist indefinitely, including after Bot
-retirement, owner changes and payload pruning. No passwords, keys or secret-derived
-fingerprints are stored. Admission and private Bots' setup/sync reject known reuse.
+retirement and payload pruning. No passwords, keys or secret-derived
+fingerprints are stored. Registration and private Bots' setup/sync reject known reuse.
 Unavailable secret values under renamed references and unobserved foreign master
 IDs still require host provenance checks; old peers' copies remain readable.
 
 Complete shared snapshots with missing or invalid history cannot authorize
 operations. Local caches or an ordinary restore do not replace that authority;
 restore may recover bytes for inspection. Fleet recovery or relocation must
-preserve the shared metadata. This fresh format has no automatic migration from
-snapshots without it; deleting all remote history loses the guard. Authorized
-shared writers are trusted, not defended against as malicious publishers.
+preserve the shared metadata. Automatic v1 migration requires valid existing
+history; missing history is not reconstructed. Deleting all remote history loses
+the guard. Shared credential holders are trusted publishers.
 
 Publication may read delivered prior shared peers' repositories for identity
-checks. Admitted shared peers must run `setup` before subsequent checks, or the
+checks. Registered shared peers must run `setup` before subsequent checks, or the
 host must withhold unneeded peer passwords. An unavailable prior repository
 holds publication; exit 10 is not permission to forget its history.
 
-Any unmarked snapshot or snapshot from another hub blocks operations on that
-repository, including restore by a valid ID, until the owner reconciles it with
+Unrecognized snapshot metadata or a snapshot from another hub blocks operations on that
+repository, including restore by a valid ID, until it is reconciled with
 restic.
 
 Obtain snapshot IDs with the configured or setup-acquired restic binary, which
@@ -96,7 +98,7 @@ inspect it before adopting data.
 
 Run `restic --repo SELECTED_REPOSITORY_URL check` with the same binary, secure
 delivery, and R2 option before accepting recovery. Coordinate a shared-repository
-check with its owner while other repository operations are paused; `check` takes
+check while other repository operations are paused; `check` takes
 an exclusive lock. Keep normal locking and never force-unlock another operation.
 Before checking a Bot repository, pause that Bot's scheduled sync, let active
 sync/pull operations finish, and coordinate with peers to keep pulls paused for
@@ -111,8 +113,9 @@ route's proxy/CA settings, as described in [SECRETS.md](SECRETS.md).
 
 For setup acceptance or a recovery drill, compare the restored relative file set
 and every source file's bytes against the quiescent source/export captured for that
-snapshot. Allow the CLI-generated `registry-history.json` and require its history
-validation separately; other missing, extra, or different files fail. `restore --verify` alone is
+snapshot. Validate updated registry/revision/history metadata and any recorded
+migration decision supplement separately; unchanged knowledge and existing decision
+bytes must match. Other missing, extra, or different files fail. `restore --verify` alone is
 insufficient. If the original is lost, report that source-byte equality cannot be
 retested; successful integrity verification is not evidence of that comparison.
 For Bot-managed remote transfers, fetch a complete verified encrypted generation
@@ -124,10 +127,12 @@ keep the original sources according to their approved retention policy.
 Incomplete/uncertain writes never authorize deletion of the prior successful
 version. A completed predecessor expires only after its unique successful
 successor reaches `sync.history_retention_seconds` in age. That setting expires
-payload versions, not the cumulative identifier guard. Cleanup requires explicit,
-owner-scoped `prune`; never force-unlock another process.
+Bot payload versions, not the cumulative identifier guard. Cleanup requires
+explicit `prune`; never force-unlock another process. This version retains shared
+v2 states and migration captures; shared storage can grow and reach a budget hold.
 
-After an interrupted initial owner setup, retry is allowed only when every
-existing shared snapshot is incomplete and belongs to that same Bot and runtime.
-The interrupted snapshots remain; a fresh backup must complete normally. Unknown
-or foreign history requires explicit host recovery.
+`setup` migrates a valid v1 hub automatically. It preserves source data in a retained
+snapshot and records a format marker that makes old CLI shared operations stop.
+After interruption, retry `setup` with the new CLI; it resumes from the recorded
+capture. Keep the format marker, capture, and CAS head. Unknown or corrupt history
+requires recovery; the CLI never silently falls back to v1.
