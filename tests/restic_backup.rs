@@ -121,6 +121,8 @@ fn backup_uses_summary_id_and_only_repository_reads_skip_locks() {
     let mut fixture = Fixture::new();
     let directory = instrument(&mut fixture);
     fixture.ok(&fixture.alpha, &["setup"]);
+    let control = shared_cache_control(&fixture, &fixture.alpha);
+    fs::write(directory.join("boundary"), "").unwrap();
     fs::write(directory.join("observed"), "").unwrap();
     fixture.ok(&fixture.alpha, &["sync"]);
     let stdout = fs::read(directory.join("backup-stdout")).unwrap();
@@ -148,12 +150,8 @@ fn backup_uses_summary_id_and_only_repository_reads_skip_locks() {
         observed[tag].last().unwrap(),
         summary["snapshot_id"].as_str().unwrap()
     );
-    assert_eq!(
-        observed
-            .iter()
-            .filter(|args| operation(args) == "restore")
-            .count(),
-        0,
+    assert!(
+        shared_data_restores(&fixture.alpha, &directory, &control, &[]).is_empty(),
         "unchanged sync must reuse the cached shared snapshot"
     );
     let snapshots = fixture.snapshots(&fixture.alpha, "bot");
@@ -200,8 +198,16 @@ fn backup_uses_summary_id_and_only_repository_reads_skip_locks() {
             );
         }
         if op == "restore" {
-            restores += 1;
             assert!(args.iter().any(|arg| arg == "--verify"));
+            let native_id = &args.windows(2).find(|pair| pair[0] == "restore").unwrap()[1];
+            let repository = &args.windows(2).find(|pair| pair[0] == "--repo").unwrap()[1];
+            if native_id == &control {
+                assert_eq!(repository, fixture.alpha.repository("shared"));
+            } else {
+                assert_eq!(repository, fixture.alpha.repository("bot"));
+                assert_eq!(native_id, snapshots[0]["id"].as_str().unwrap());
+                restores += 1;
+            }
         }
     }
     assert!(reads > 0);

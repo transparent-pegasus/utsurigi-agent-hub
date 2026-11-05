@@ -409,6 +409,112 @@ impl Fixture {
     }
 }
 
+// Fresh local hubs have one dedicated control tree, separate from shared-v2 data.
+// Validate its native identity and payload before allowing any reads of it.
+pub fn shared_cache_control(fixture: &Fixture, bot: &Bot) -> String {
+    let snapshots = fixture.snapshots(bot, "shared");
+    let fences: Vec<_> = snapshots
+        .iter()
+        .filter(|snapshot| {
+            snapshot["tags"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("uah2:kind:format-fence"))
+        })
+        .collect();
+    assert_eq!(fences.len(), 1, "fresh fixture must have one format fence");
+    let fence = fences[0];
+    let tags: BTreeSet<_> = fence["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tag| tag.as_str().unwrap().to_owned())
+        .collect();
+    let hub = bot.config["hub"].as_str().unwrap();
+    assert_eq!(
+        tags,
+        BTreeSet::from([
+            "uah2:kind:format-fence".to_owned(),
+            "uah2:format:2".to_owned(),
+            format!("uah2:hub:{hub}"),
+        ])
+    );
+    assert_eq!(fence["tags"].as_array().unwrap().len(), 3);
+    let id = fence["id"].as_str().unwrap();
+    assert_eq!(id.len(), 64);
+    assert!(id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let accepted = fixture.current_shared_id(bot);
+    assert_ne!(accepted, id);
+    let data = snapshots
+        .iter()
+        .find(|snapshot| snapshot["id"] == accepted)
+        .unwrap();
+    assert!(
+        data["tags"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("kind:shared-v2"))
+    );
+    let target = fixture.temp.path().join("cache-control-proof");
+    success(&fixture.restic(
+        bot,
+        "shared",
+        &[
+            "restore",
+            id,
+            "--target",
+            target.to_str().unwrap(),
+            "--verify",
+        ],
+    ));
+    let payload: Value =
+        serde_json::from_slice(&fs::read(target.join("format-fence.json")).unwrap()).unwrap();
+    assert_eq!(
+        payload,
+        json!({
+            "type": "utsurigi-agent-hub/format-fence", "format": 2, "hub": hub,
+            "source": null, "capture": null,
+        })
+    );
+    id.to_owned()
+}
+
+// Account for every restore by exact native ID and repository. Unknown trees,
+// aliases such as latest, and predecessor data cannot hide among control reads.
+pub fn shared_data_restores(
+    bot: &Bot,
+    tool: &Path,
+    control: &str,
+    allowed_data: &[&str],
+) -> Vec<String> {
+    let boundary = fs::read_to_string(tool.join("boundary")).unwrap();
+    let mut restored = Vec::new();
+    for call in boundary.split("__CALL__\n").skip(1) {
+        let args: Vec<_> = call
+            .lines()
+            .filter_map(|line| line.strip_prefix("arg:"))
+            .collect();
+        let Some(index) = args.iter().position(|argument| *argument == "restore") else {
+            continue;
+        };
+        let repository = args
+            .windows(2)
+            .find_map(|pair| (pair[0] == "--repo").then_some(pair[1]));
+        assert_eq!(repository, Some(bot.repository("shared")), "{args:?}");
+        let snapshot = *args
+            .get(index + 1)
+            .expect("restore needs a native snapshot ID");
+        if snapshot != control {
+            assert!(
+                allowed_data.contains(&snapshot),
+                "unexpected data restore {snapshot}: {args:?}"
+            );
+            restored.push(snapshot.to_owned());
+        }
+    }
+    restored
+}
+
 pub fn copy_tree(source: &Path, target: &Path) {
     fs::create_dir_all(target).unwrap();
     for entry in fs::read_dir(source).unwrap() {

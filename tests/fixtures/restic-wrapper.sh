@@ -58,6 +58,18 @@ case "$mode:$operation" in
         exit 1
         ;;
     restore-failure:restore)
+        # Optional exact target keeps control validation real before the data fault.
+        if [ -f "$fixture_dir/restore-failure-snapshot" ]; then
+            snapshot=
+            previous=
+            for argument do
+                if [ "$previous" = restore ]; then snapshot=$argument; break; fi
+                previous=$argument
+            done
+            if [ "$snapshot" != "$(cat "$fixture_dir/restore-failure-snapshot")" ]; then
+                exec "$fixture_dir/real-restic" "$@"
+            fi
+        fi
         "$fixture_dir/real-restic" "$@"
         printf '%s\n' 'synthetic interrupted restore' >&2
         exit 1
