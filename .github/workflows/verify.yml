@@ -61,7 +61,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+        # Nine shards plus checks per event fit push and PR into 20 hosted slots.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -85,7 +86,7 @@ jobs:
 
       - name: Run hub test shard
         run: >-
-          python3 .github/scripts/shard-hub-tests.py --shard ${{ matrix.shard }} --shards 20 --workers 4
+          python3 .github/scripts/shard-hub-tests.py --shard ${{ matrix.shard }} --shards 9 --workers 4
           --isolate test:cli_contract::hub_snapshot_guards_inspect_all_records_and_preserve_data_on_rejection
 
   verify:
