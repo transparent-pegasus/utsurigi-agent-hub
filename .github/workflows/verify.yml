@@ -5,6 +5,10 @@ on: [push, pull_request]
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event_name == 'pull_request' && 'branch' || github.ref_type }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 defaults:
   run:
     shell: bash
@@ -29,7 +33,9 @@ jobs:
           cargo run --locked -- validate --template
 
       - name: Check test sharder
-        run: python3 .github/scripts/shard-hub-tests.py --self-test
+        run: |
+          python3 .github/scripts/shard-hub-tests.py --self-test
+          python3 .github/scripts/test-shard-hub-tests.py
 
       - name: Check optional utsurigi-memory
         run: |
@@ -55,7 +61,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -78,7 +84,9 @@ jobs:
           echo "UTSURIGI_AGENT_HUB_TEST_RESTIC=$RUNNER_TEMP/bin/restic" >> "$GITHUB_ENV"
 
       - name: Run hub test shard
-        run: python3 .github/scripts/shard-hub-tests.py --shard ${{ matrix.shard }} --shards 8
+        run: >-
+          python3 .github/scripts/shard-hub-tests.py --shard ${{ matrix.shard }} --shards 20 --workers 4
+          --isolate test:cli_contract::hub_snapshot_guards_inspect_all_records_and_preserve_data_on_rejection
 
   verify:
     name: verify
