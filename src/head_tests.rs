@@ -9,7 +9,9 @@
 use super::{Head, HeadStore, ObservedHead};
 use crate::config::{CHILD_ENV, Config};
 use crate::error::Result;
+use crate::objects::{Condition, Fetched, MAX_OBJECT_BYTES, ObjectStore, Written};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -755,6 +757,10 @@ fn put_calls(root: &Path) -> Vec<Value> {
 }
 
 fn check_transport(root: &Path, timeout: f64) {
+    check_transport_to(root, timeout, &[OBJECT]);
+}
+
+fn check_transport_to(root: &Path, timeout: f64, urls: &[&str]) {
     let calls = calls(root);
     assert!(
         !calls.is_empty(),
@@ -762,7 +768,11 @@ fn check_transport(root: &Path, timeout: f64) {
     );
     for call in calls {
         assert_eq!(call["argv"][0], "-q");
-        assert_eq!(option(&call, "url"), Some(OBJECT));
+        let url = option(&call, "url");
+        assert!(
+            url.is_some_and(|url| urls.contains(&url)),
+            "unexpected URL {url:?}"
+        );
         assert_eq!(
             option(&call, "user"),
             Some(format!("{ACCESS}:{SECRET}").as_str())
@@ -1381,6 +1391,416 @@ fn r2_stdout_and_stderr_are_bounded_even_for_malformed_responses() {
                     "{stream} was buffered without a bound"
                 );
             }
+        },
+    );
+}
+
+// Small-object store over the same offline curl boundary (plan Task 1).
+
+const LIST: &str = "uah-live/list.json";
+const LIST_URL: &str = "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com/ownerless-head-fixture/shared/prefix/uah-live/list.json";
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Remote state with an absent head; other keys are served from `stored`.
+fn remote_objects(stored: Value) -> Value {
+    json!({"exists": false, "etag": "\"absent\"", "objects": stored})
+}
+
+fn object(body: &[u8]) -> Value {
+    json!({"etag": ETAG, "body_hex": hex(body)})
+}
+
+fn failure<T>(result: Result<T>) -> String {
+    match result {
+        Ok(_) => panic!("live object operation must fail"),
+        Err(error) => error.message,
+    }
+}
+
+fn found(fetched: Fetched) -> (Vec<u8>, String) {
+    match fetched {
+        Fetched::Found { body, token } => (body, token),
+        Fetched::Missing => panic!("expected Found, got Missing"),
+        Fetched::NotModified => panic!("expected Found, got NotModified"),
+    }
+}
+
+#[test]
+fn r2_object_get_handles_200_304_404() {
+    isolated("r2_object_get_handles_200_304_404", |root| {
+        let mut slow = config(root, "r2");
+        slow.sync.stuck_request_timeout_seconds = 1;
+        let mut capped = config(root, "r2");
+        capped.sync.stuck_request_timeout_seconds = 300;
+        let config = config(root, "r2");
+        let body = b"\x00sealed\r\n\xff";
+        let stored = || remote_objects(json!({(LIST): object(body)}));
+        let absent = format!(
+            "{}/uah-live/absent.json",
+            REPOSITORY.strip_prefix("s3:").unwrap()
+        );
+        fixture(root, stored(), json!({}));
+        let store = must(ObjectStore::new(&config, REPOSITORY));
+        assert_eq!(
+            found(must(store.get(LIST, None, 1024))),
+            (body.to_vec(), ETAG.to_owned())
+        );
+        assert!(matches!(
+            must(store.get(LIST, Some(ETAG), 1024)),
+            Fetched::NotModified
+        ));
+        assert_eq!(
+            found(must(store.get(LIST, Some("\"stale\""), 1024))),
+            (body.to_vec(), ETAG.to_owned())
+        );
+        assert!(matches!(
+            must(store.get("uah-live/absent.json", None, 1024)),
+            Fetched::Missing
+        ));
+        let gets = calls(root);
+        let methods: Vec<_> = gets.iter().map(|call| call["method"].as_str()).collect();
+        assert_eq!(methods, [Some("GET"); 4]);
+        assert!(gets[0]["headers"].get("if-none-match").is_none());
+        assert_eq!(gets[1]["headers"]["if-none-match"], json!([ETAG]));
+        assert_eq!(gets[2]["headers"]["if-none-match"], json!(["\"stale\""]));
+        check_transport_to(root, 2.0, &[LIST_URL, absent.as_str()]);
+
+        for status in [201, 204, 206, 301, 401, 403, 412, 429, 500, 503] {
+            fixture(root, stored(), json!({"get": {"status": status}}));
+            assert_eq!(
+                failure(store.get(LIST, None, 1024)),
+                format!("Live object GET failed (HTTP {status}); check backend access and retry")
+            );
+        }
+        for broken in [
+            json!({"status": 0, "exit": 7}),
+            json!({"status": 200, "exit": 56}),
+        ] {
+            fixture(root, stored(), json!({ "get": broken }));
+            assert_eq!(
+                failure(store.get(LIST, None, 1024)),
+                "Live object GET transport failed; retry the read"
+            );
+        }
+        fixture(root, stored(), json!({"get": {"delay_seconds": 3}}));
+        let started = Instant::now();
+        assert_eq!(
+            failure(must(ObjectStore::new(&slow, REPOSITORY)).get(LIST, None, 1024)),
+            "Live object GET transport failed; retry the read"
+        );
+        assert!(started.elapsed() < Duration::from_secs(4));
+        check_transport_to(root, 1.0, &[LIST_URL]);
+        fixture(root, stored(), json!({}));
+        must(must(ObjectStore::new(&capped, REPOSITORY)).get(LIST, None, 1024));
+        check_transport_to(root, 300.0, &[LIST_URL]); // Asserts the 120-second cap.
+        for etags in [
+            json!([]),
+            json!(["W/\"weak\""]),
+            json!(["unquoted"]),
+            json!([ETAG, "\"other\""]),
+        ] {
+            fixture(root, stored(), json!({"get": {"etags": etags}}));
+            assert!(
+                store.get(LIST, None, 1024).is_err(),
+                "HTTP 200 accepted with ETags {etags}"
+            );
+        }
+        for token in ["", "unquoted", "W/\"weak\"", "\"ok\"\r\nX-Injected: yes"] {
+            fixture(root, stored(), json!({}));
+            assert!(
+                store.get(LIST, Some(token), 1024).is_err(),
+                "sent If-None-Match {token:?}"
+            );
+            assert!(calls(root).is_empty(), "an invalid token reached curl");
+        }
+    });
+}
+
+#[test]
+fn r2_object_put_sends_conditions_and_maps_412() {
+    isolated("r2_object_put_sends_conditions_and_maps_412", |root| {
+        let config = config(root, "r2");
+        let body = b"\x00sealed\r\n\xff";
+        fixture(root, remote_objects(json!({})), json!({}));
+        let store = must(ObjectStore::new(&config, REPOSITORY));
+        let created = "\"new.etag/+==:2\""; // The fake's ETag for its first write.
+        assert_eq!(must(store.put(LIST, body, Condition::Create)), Written::Yes);
+        assert_eq!(
+            must(store.put(LIST, b"second", Condition::Create)),
+            Written::Conflict
+        );
+        assert_eq!(
+            must(store.put(LIST, b"replaced", Condition::Match(created))),
+            Written::Yes
+        );
+        assert_eq!(
+            must(store.put(LIST, b"stale", Condition::Match(created))),
+            Written::Conflict
+        );
+        let puts = put_calls(root);
+        assert_eq!(puts.len(), 4, "a losing write must never be replayed");
+        for (call, (header, value)) in puts.iter().zip([
+            ("if-none-match", "*"),
+            ("if-none-match", "*"),
+            ("if-match", created),
+            ("if-match", created),
+        ]) {
+            assert_eq!(call["headers"][header], json!([value]));
+        }
+        assert_eq!(puts[0]["body_hex"], hex(body));
+        assert_eq!(puts[2]["body_hex"], hex(b"replaced"));
+        assert_eq!(
+            found(must(store.get(LIST, None, 1024))),
+            (b"replaced".to_vec(), "\"new.etag/+==:3\"".to_owned())
+        );
+        check_transport_to(root, 2.0, &[LIST_URL]);
+
+        fixture(
+            root,
+            remote_objects(json!({(LIST): object(b"old")})),
+            json!({}),
+        );
+        assert_eq!(
+            must(store.put(LIST, body, Condition::Match(ETAG))),
+            Written::Yes
+        );
+        assert_eq!(put_calls(root)[0]["headers"]["if-match"], json!([ETAG]));
+        for (status, written) in [
+            (200, Written::Yes),
+            (201, Written::Yes),
+            (204, Written::Yes),
+            (412, Written::Conflict),
+        ] {
+            fixture(
+                root,
+                remote_objects(json!({})),
+                json!({"put": {"status": status}}),
+            );
+            assert_eq!(
+                must(store.put(LIST, body, Condition::Create)),
+                written,
+                "HTTP {status}"
+            );
+            assert_eq!(put_calls(root).len(), 1);
+        }
+        for status in [301, 400, 401, 403, 404, 409, 429, 500, 503] {
+            fixture(
+                root,
+                remote_objects(json!({})),
+                json!({"put": {"status": status}}),
+            );
+            assert!(
+                store.put(LIST, body, Condition::Create).is_err(),
+                "HTTP {status} must fail"
+            );
+            assert_eq!(put_calls(root).len(), 1, "HTTP {status} was replayed");
+        }
+        fixture(root, remote_objects(json!({})), json!({}));
+        let injected = Condition::Match("\"ok\"\r\nX-Injected: yes");
+        assert!(store.put(LIST, body, injected).is_err());
+        assert!(calls(root).is_empty(), "an injected condition reached curl");
+    });
+}
+
+#[test]
+fn r2_object_put_without_response_is_uncertain() {
+    isolated("r2_object_put_without_response_is_uncertain", |root| {
+        let mut slow = config(root, "r2");
+        slow.sync.stuck_request_timeout_seconds = 1;
+        let config = config(root, "r2");
+        for (existing, lost) in [
+            (
+                false,
+                json!({"status": 0, "exit": 56, "commit_before_error": true}),
+            ),
+            (
+                true,
+                json!({"status": 0, "exit": 56, "commit_before_error": true}),
+            ),
+            (false, json!({"status": 0, "exit": 7})),
+            (true, json!({"status": 200, "exit": 56})),
+        ] {
+            let stored = if existing {
+                json!({(LIST): object(b"old")})
+            } else {
+                json!({})
+            };
+            fixture(root, remote_objects(stored), json!({ "put": lost }));
+            let store = must(ObjectStore::new(&config, REPOSITORY));
+            let condition = if existing {
+                Condition::Match(ETAG)
+            } else {
+                Condition::Create
+            };
+            assert_eq!(
+                must(store.put(LIST, b"new", condition)),
+                Written::Uncertain,
+                "{lost}"
+            );
+            assert_eq!(put_calls(root).len(), 1, "an uncertain PUT was replayed");
+            check_transport_to(root, 2.0, &[LIST_URL]);
+        }
+        fixture(
+            root,
+            remote_objects(json!({})),
+            json!({"put": {"delay_seconds": 3}}),
+        );
+        let started = Instant::now();
+        assert_eq!(
+            must(must(ObjectStore::new(&slow, REPOSITORY)).put(LIST, b"new", Condition::Create)),
+            Written::Uncertain
+        );
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert_eq!(put_calls(root).len(), 1);
+    });
+}
+
+#[test]
+fn r2_object_delete_accepts_404() {
+    isolated("r2_object_delete_accepts_404", |root| {
+        let config = config(root, "r2");
+        let stored = || remote_objects(json!({(LIST): object(b"old")}));
+        fixture(root, stored(), json!({}));
+        let store = must(ObjectStore::new(&config, REPOSITORY));
+        must(store.delete(LIST));
+        assert!(matches!(
+            must(store.get(LIST, None, 1024)),
+            Fetched::Missing
+        ));
+        must(store.delete(LIST));
+        let deletes: Vec<_> = calls(root)
+            .iter()
+            .filter(|call| call["method"] == "DELETE")
+            .map(|call| call["status"].as_u64())
+            .collect();
+        assert_eq!(deletes, [Some(204), Some(404)]);
+        check_transport_to(root, 2.0, &[LIST_URL]);
+        for status in [200, 204, 404] {
+            fixture(root, stored(), json!({"delete": {"status": status}}));
+            must(store.delete(LIST));
+        }
+        for failed in [
+            json!({"status": 403}),
+            json!({"status": 412}),
+            json!({"status": 500}),
+            json!({"status": 0, "exit": 7}),
+            json!({"status": 204, "exit": 56}),
+        ] {
+            fixture(root, stored(), json!({ "delete": failed }));
+            assert!(store.delete(LIST).is_err(), "DELETE {failed} must fail");
+        }
+    });
+}
+
+#[test]
+fn r2_object_url_is_prefix_plus_key() {
+    isolated("r2_object_url_is_prefix_plus_key", |root| {
+        let config = config(root, "r2");
+        for repository in [REPOSITORY.to_owned(), format!("{REPOSITORY}/")] {
+            fixture(root, remote_objects(json!({})), json!({}));
+            let store = must(ObjectStore::new(&config, &repository));
+            assert!(matches!(
+                must(store.get(LIST, None, 1024)),
+                Fetched::Missing
+            ));
+            assert_eq!(must(store.put(LIST, b"x", Condition::Create)), Written::Yes);
+            must(store.delete(LIST));
+            let requests = calls(root);
+            let methods: Vec<_> = requests
+                .iter()
+                .map(|call| call["method"].as_str())
+                .collect();
+            assert_eq!(methods, [Some("GET"), Some("PUT"), Some("DELETE")]);
+            for call in &requests {
+                assert_eq!(option(call, "url"), Some(LIST_URL), "from {repository}");
+            }
+            check_transport_to(root, 2.0, &[LIST_URL]);
+        }
+        for repository in [
+            REPOSITORY.replacen("https://", "http://", 1),
+            format!("{REPOSITORY}?query=1"),
+            REPOSITORY.replacen("https://", "https://user:password@", 1),
+            "s3:https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com".to_owned(),
+            format!("{REPOSITORY}/%2e%2e"),
+        ] {
+            fixture(root, remote_objects(json!({})), json!({}));
+            assert!(
+                ObjectStore::new(&config, &repository)
+                    .and_then(|store| store.get(LIST, None, 1024))
+                    .is_err(),
+                "accepted {repository}"
+            );
+            assert!(calls(root).is_empty(), "an invalid URL reached curl");
+        }
+        let store = must(ObjectStore::new(&config, REPOSITORY));
+        for key in [
+            "",
+            "../x",
+            "a//b",
+            "a/./b",
+            "a b",
+            "a/b/c/d/e/f/g/h/i",
+            "/uah-live/list.json",
+            "a%2Fb",
+            "a?b",
+            "a#b",
+        ] {
+            fixture(root, remote_objects(json!({})), json!({}));
+            let invalid = "Invalid live object key";
+            assert_eq!(failure(store.get(key, None, 1024)), invalid, "{key:?}");
+            assert_eq!(
+                failure(store.put(key, b"x", Condition::Create)),
+                invalid,
+                "{key:?}"
+            );
+            assert_eq!(failure(store.delete(key)), invalid, "{key:?}");
+            assert!(calls(root).is_empty(), "an invalid key reached curl");
+        }
+    });
+}
+
+#[test]
+fn r2_object_bodies_follow_the_limit_up_to_one_mebibyte() {
+    isolated(
+        "r2_object_bodies_follow_the_limit_up_to_one_mebibyte",
+        |root| {
+            let config = config(root, "r2");
+            let largest = vec![b'z'; MAX_OBJECT_BYTES as usize];
+            let oversized = [largest.as_slice(), &b"z"[..]].concat();
+            fixture(
+                root,
+                remote_objects(json!({(LIST): object(&largest)})),
+                json!({}),
+            );
+            let store = must(ObjectStore::new(&config, REPOSITORY));
+            let (body, token) = found(must(store.get(LIST, None, MAX_OBJECT_BYTES)));
+            assert!(
+                body == largest,
+                "a MAX_OBJECT_BYTES body must arrive intact"
+            );
+            assert_eq!(token, ETAG);
+            check_transport_to(root, 2.0, &[LIST_URL]);
+            assert!(store.get(LIST, None, MAX_OBJECT_BYTES - 1).is_err());
+            assert!(store.get(LIST, None, MAX_OBJECT_BYTES + 1).is_err());
+
+            fixture(root, remote_objects(json!({})), json!({}));
+            assert!(store.put(LIST, &oversized, Condition::Create).is_err());
+            assert!(put_calls(root).is_empty(), "an oversized body was uploaded");
+            assert_eq!(
+                must(store.put(LIST, &largest, Condition::Create)),
+                Written::Yes
+            );
+            let puts = put_calls(root);
+            assert_eq!(puts.len(), 1);
+            assert_eq!(puts[0]["body_size"], MAX_OBJECT_BYTES);
+            assert_eq!(
+                puts[0]["body_sha256"],
+                format!("{:x}", Sha256::digest(&largest))
+            );
+            check_transport_to(root, 2.0, &[LIST_URL]);
         },
     );
 }
