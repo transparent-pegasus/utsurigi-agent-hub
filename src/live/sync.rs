@@ -1,6 +1,7 @@
-//! `live check` and `live define`: listed files merged three ways through the Bot's CAS list.
+//! `live check`, `live define`, and `live request`: listed files merged three ways through each
+//! Bot's CAS list.
 
-use crate::config::{Config, Repository, no_symlinks};
+use crate::config::{Config, Repository, absolute, no_symlinks};
 use crate::error::{Error, IoContext, Result};
 use crate::live::cadence::{backoff, interval, jitter};
 use crate::live::crypto::{self, Key, Kind, SALT_BYTES};
@@ -222,7 +223,6 @@ fn run(config: &Config, root: &Path, live: &mut Live, now: i64) -> Result<Report
     let shared = ObjectStore::new(config, url(&config.repositories.shared))?;
     // A pending write, or a cache newer than the index last seen, needs the index body.
     let whole = live.pending_index.is_some()
-        || live.pending_hub.is_some()
         || live
             .index
             .as_ref()
@@ -289,7 +289,7 @@ fn run(config: &Config, root: &Path, live: &mut Live, now: i64) -> Result<Report
         live.pending_index = Some(merged.revision);
         live.save(root)?;
     }
-    if live.pending_index.is_some() || live.pending_hub.is_some() || repair {
+    if live.pending_index.is_some() || repair {
         update_index(config, &shared, live, observed, &cached)?;
     }
     if let Some(merged) = merged {
@@ -334,7 +334,7 @@ fn merge_list(
         };
         // The spec decrypts only under the right key, so nothing is ever sealed with a wrong one.
         let key = derive(&password, &list)?;
-        let spec = open_spec(&key, config, &list)?;
+        let spec = open_spec(&key, &config.hub, config.id(), &list)?;
         match &live.list {
             Some(applied) if applied.salt == list.salt => {
                 if list.revision < applied.revision {
@@ -351,7 +351,7 @@ fn merge_list(
             globs,
         };
         live.base.retain(|path, _| scope.tracks(path));
-        let names = open_names(&key, config, &list)?;
+        let names = open_names(&key, &config.hub, config.id(), &list)?;
         let listed: BTreeMap<String, String> = names
             .iter()
             .zip(&list.entries)
@@ -480,7 +480,7 @@ fn merge_list(
         if wrote {
             let mut sealed = Vec::new();
             for (path, plain) in &pushes {
-                let (entry, object) = seal(&key, config, path, plain)?;
+                let (entry, object) = seal(&key, &config.hub, config.id(), path, plain)?;
                 base.insert(path.clone(), base_of(entry.sha256.clone(), plain));
                 pushed.insert(path.clone());
                 sealed.push((entry, object));
@@ -582,56 +582,63 @@ fn apply(
     Ok(())
 }
 
-/// Records this machine's list revision and newer hub mark in the index, by CAS.
+/// Records this machine's pending list revision and its cached hub mark in the index.
 fn update_index(
     config: &Config,
     store: &ObjectStore,
     live: &mut Live,
-    mut observed: Observed,
+    observed: Observed,
     cached: &HubMark,
 ) -> Result<()> {
     let key = bot_key(&config.hub, config.id());
-    let hub = live
-        .pending_hub
-        .iter()
-        .chain([cached])
-        .max_by_key(|mark| mark.revision)
-        .expect("a cached hub mark")
-        .clone();
+    let listed = live.pending_index.map(|revision| (key.as_str(), revision));
+    if raise_index(config, store, observed, listed, cached)? {
+        // A write leaves no token to trust; the next check reads the index in full.
+        live.index = None;
+    }
+    live.pending_index = None;
+    Ok(())
+}
+
+/// Records a newly committed hub head in the index, without the Bot state lock or `live.json`.
+pub fn raise_hub(config: &Config, hub: &HubMark) -> Result<()> {
+    let store = ObjectStore::new(config, url(&config.repositories.shared))?;
+    raise_index(config, &store, None, None, hub).map(drop)
+}
+
+/// Raises `listed` (a Bot key and its list revision) and `hub` into the index by CAS, creating
+/// the index when absent. Returns whether it sent a write.
+fn raise_index(
+    config: &Config,
+    store: &ObjectStore,
+    mut observed: Observed,
+    listed: Option<(&str, u64)>,
+    hub: &HubMark,
+) -> Result<bool> {
+    let mut wrote = false;
     for _ in 0..CAS_ATTEMPTS {
         // An unconditional read never answers NotModified.
         let current = match observed.take() {
             Some(current) => current,
             None => read_index(store, None)?.flatten(),
         };
-        let settled = match next_index(
-            current.as_ref().map(|(index, _)| index),
-            &key,
-            live.pending_index,
-            &hub,
-        ) {
-            None => true,
-            Some(next) => {
-                let bytes = next.encode()?;
-                budget::authorize(
-                    config,
-                    &[url(&config.repositories.shared)],
-                    bytes.len() as u64,
-                )?;
-                // A write leaves no token to trust; the next check reads the index in full.
-                live.index = None;
-                let condition = match &current {
-                    Some((_, token)) => Condition::Match(token),
-                    None => Condition::Create,
-                };
-                // On a conflict or a lost response, the next round re-reads and sees the result.
-                store.put(INDEX, &bytes, condition)? == Written::Yes
-            }
+        let Some(next) = next_index(current.as_ref().map(|(index, _)| index), listed, hub) else {
+            return Ok(wrote);
         };
-        if settled {
-            live.pending_index = None;
-            live.pending_hub = None;
-            return Ok(());
+        let bytes = next.encode()?;
+        budget::authorize(
+            config,
+            &[url(&config.repositories.shared)],
+            bytes.len() as u64,
+        )?;
+        wrote = true;
+        let condition = match &current {
+            Some((_, token)) => Condition::Match(token),
+            None => Condition::Create,
+        };
+        // On a conflict or a lost response, the next round re-reads and sees the result.
+        if store.put(INDEX, &bytes, condition)? == Written::Yes {
+            return Ok(true);
         }
     }
     Err(Error::new(
@@ -639,30 +646,25 @@ fn update_index(
     ))
 }
 
-/// The index with this machine's updates, or `None` when it needs no write.
+/// The index with `listed` and `hub` raised into it, or `None` when it needs no write.
 fn next_index(
     current: Option<&Index>,
-    key: &str,
-    revision: Option<u64>,
+    listed: Option<(&str, u64)>,
     hub: &HubMark,
 ) -> Option<Index> {
-    let Some(current) = current else {
-        // The first list writer creates the index; a hub repair alone never does.
-        return revision.map(|revision| Index {
-            version: 1,
-            hub: hub.clone(),
-            bots: BTreeMap::from([(key.to_owned(), revision)]),
-        });
-    };
-    let mut next = current.clone();
-    if let Some(revision) = revision {
-        let listed = next.bots.entry(key.to_owned()).or_insert(revision);
-        *listed = (*listed).max(revision);
+    let mut next = current.cloned().unwrap_or_else(|| Index {
+        version: 1,
+        hub: hub.clone(),
+        bots: BTreeMap::new(),
+    });
+    if let Some((key, revision)) = listed {
+        let entry = next.bots.entry(key.to_owned()).or_insert(revision);
+        *entry = (*entry).max(revision);
     }
     if hub.revision > next.hub.revision {
         next.hub = hub.clone();
     }
-    (next != *current).then_some(next)
+    (current != Some(&next)).then_some(next)
 }
 
 pub fn define(config: &Config, tasks: &[String], rules: &[String], policy: Policy) -> Result<()> {
@@ -716,13 +718,16 @@ pub fn define(config: &Config, tasks: &[String], rules: &[String], policy: Polic
             }
             Some((list, _)) => {
                 let key = derive(&password, list)?;
-                open_spec(&key, config, list).map_err(|_| {
+                open_spec(&key, &config.hub, config.id(), list).map_err(|_| {
                     Error::new(
                         "Live list cannot be decrypted with this repository password; delete uah-live/ from storage and define again",
                     )
                 })?;
                 let mut entries = Vec::new();
-                for (path, entry) in open_names(&key, config, list)?.iter().zip(&list.entries) {
+                for (path, entry) in open_names(&key, &config.hub, config.id(), list)?
+                    .iter()
+                    .zip(&list.entries)
+                {
                     if spec.roots.iter().any(|root| covers(&root.path, path)) {
                         entries.push(entry.clone());
                     } else {
@@ -765,6 +770,119 @@ pub fn define(config: &Config, tasks: &[String], rules: &[String], policy: Polic
     Err(Error::new(
         "Live list stayed in conflict; retry live define",
     ))
+}
+
+/// Appends `file` to a shared target Bot's list, in its first task directory.
+pub fn request(config: &Config, bot_id: &str, file: &Path) -> Result<()> {
+    config.runtime()?;
+    let _lock = Lock::acquire(state_root(config))?;
+    let cached = joined(config)?;
+    let active = shared::active(config)?.ok_or_else(missing_cache)?;
+    let target = Registry::load(&active, config)?
+        .entry(bot_id)
+        .map_err(|_| Error::new("Target Bot is absent from the cached registry"))?
+        .clone();
+    if !target.shared {
+        return Err(Error::new("Live requests require a shared target Bot"));
+    }
+    let password = password(&target.repository())?;
+    let plain = request_file(file)?;
+    // Only the final component gives the extension.
+    let source = file
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| Error::new("Live request file name must be UTF-8"))?;
+    let store = ObjectStore::new(config, &target.repository)?;
+    let shared = ObjectStore::new(config, url(&config.repositories.shared))?;
+    let no_requests = || Error::new("Target Bot accepts no live requests");
+    for _ in 0..CAS_ATTEMPTS {
+        let (list, token) = read_list(&store)?.ok_or_else(no_requests)?;
+        // The spec decrypts only under the right key, so nothing is sealed with a wrong one.
+        let key = derive(&password, &list)?;
+        let spec = open_spec(&key, &config.hub, &target.id, &list)?;
+        let root = spec
+            .roots
+            .iter()
+            .find(|root| root.class == Class::Task && root.path.ends_with('/'))
+            .ok_or_else(no_requests)?;
+        let path = merge::request_name(&root.path, config.id(), &sha256_hex(&plain), source);
+        relative_path(&path)?;
+        let revision = if open_names(&key, &config.hub, &target.id, &list)?.contains(&path) {
+            // A retried request: the list holds it, but the index may still lack it.
+            list.revision
+        } else {
+            if list.entries.len() >= MAX_ENTRIES {
+                return Err(Error::new("Target Bot's live list is full"));
+            }
+            let (entry, object) = seal(&key, &config.hub, &target.id, &path, &plain)?;
+            let revision = list
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| Error::new("Live list revision overflow"))?;
+            let mut entries = list.entries;
+            entries.push(entry.clone());
+            let bytes = List {
+                version: 1,
+                revision,
+                salt: list.salt,
+                spec: list.spec,
+                entries,
+            }
+            .encode()?;
+            budget::authorize(
+                config,
+                &[&target.repository],
+                (object.len() + bytes.len()) as u64,
+            )?;
+            put_object(&store, &entry.sha256, &object)?;
+            if !put_list(&store, &bytes, Condition::Match(&token))? {
+                continue;
+            }
+            revision
+        };
+        let index_key = bot_key(&config.hub, &target.id);
+        raise_index(config, &shared, None, Some((&index_key, revision)), &cached).map_err(
+            |error| {
+                Error::new(format!(
+                    "Live request is stored, but notifying the target failed; retry the request: {}",
+                    error.message
+                ))
+            },
+        )?;
+        println!("{}", json!({"requested": path}));
+        return Ok(());
+    }
+    Err(Error::new(
+        "Live list stayed in conflict; retry live request",
+    ))
+}
+
+/// A request file's bytes: a regular file reached without symlinks, small enough to seal.
+fn request_file(file: &Path) -> Result<Vec<u8>> {
+    let path = absolute(&std::env::current_dir()?, file)?;
+    let opened = open_source(Path::new("/"), &path)?;
+    if !opened
+        .metadata()
+        .at("Cannot inspect live request file", &path)?
+        .is_file()
+    {
+        return Err(Error::new(format!(
+            "Live request file must be a regular file: {}",
+            path.display()
+        )));
+    }
+    let mut plain = Vec::new();
+    opened
+        .take(MAX_PLAINTEXT + 1)
+        .read_to_end(&mut plain)
+        .at("Cannot read live request file", &path)?;
+    if plain.len() as u64 > MAX_PLAINTEXT {
+        return Err(Error::new(format!(
+            "Live request file exceeds the 1 MiB limit: {}",
+            path.display()
+        )));
+    }
+    Ok(plain)
 }
 
 /// Checks one `live define` path and returns it as a list root: `dir/` or `file`.
@@ -869,15 +987,8 @@ fn derive(password: &OsStr, list: &List) -> Result<Key> {
     crypto::derive(password.as_encoded_bytes(), &salt)
 }
 
-fn open_spec(key: &Key, config: &Config, list: &List) -> Result<Spec> {
-    let plain = crypto::open(
-        key,
-        &config.hub,
-        config.id(),
-        Kind::Spec,
-        None,
-        &unhex(&list.spec)?,
-    )?;
+fn open_spec(key: &Key, hub: &str, bot: &str, list: &List) -> Result<Spec> {
+    let plain = crypto::open(key, hub, bot, Kind::Spec, None, &unhex(&list.spec)?)?;
     let spec: Spec = serde_json::from_slice(&plain).map_err(|_| Error::new("Invalid live list"))?;
     spec.validate()?;
     Ok(spec)
@@ -896,15 +1007,15 @@ fn seal_spec(key: &Key, config: &Config, spec: &Spec) -> Result<String> {
 }
 
 /// Decrypts every entry name; each must be a distinct relative file path.
-fn open_names(key: &Key, config: &Config, list: &List) -> Result<Vec<String>> {
+fn open_names(key: &Key, hub: &str, bot: &str, list: &List) -> Result<Vec<String>> {
     let mut seen = HashSet::new();
     list.entries
         .iter()
         .map(|entry| {
             let plain = crypto::open(
                 key,
-                &config.hub,
-                config.id(),
+                hub,
+                bot,
                 Kind::Name,
                 Some(&entry.sha256),
                 &unhex(&entry.name)?,
@@ -920,13 +1031,13 @@ fn open_names(key: &Key, config: &Config, list: &List) -> Result<Vec<String>> {
 }
 
 /// Seals a file as an object and its name bound to that object's SHA-256.
-fn seal(key: &Key, config: &Config, path: &str, plain: &[u8]) -> Result<(Entry, Vec<u8>)> {
-    let object = crypto::seal(key, &config.hub, config.id(), Kind::Object, None, plain)?;
+fn seal(key: &Key, hub: &str, bot: &str, path: &str, plain: &[u8]) -> Result<(Entry, Vec<u8>)> {
+    let object = crypto::seal(key, hub, bot, Kind::Object, None, plain)?;
     let sha256 = sha256_hex(&object);
     let name = hex(&crypto::seal(
         key,
-        &config.hub,
-        config.id(),
+        hub,
+        bot,
         Kind::Name,
         Some(&sha256),
         path.as_bytes(),

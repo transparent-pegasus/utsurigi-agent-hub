@@ -102,6 +102,11 @@ enum LiveAction {
         #[arg(long)]
         rule_idle_seconds: Option<u64>,
     },
+    Request {
+        bot_id: String,
+        #[arg(long)]
+        file: PathBuf,
+    },
 }
 
 fn main() {

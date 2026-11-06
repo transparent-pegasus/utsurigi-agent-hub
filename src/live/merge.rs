@@ -76,8 +76,6 @@ pub fn conflict_name(path: &str, sha: &str) -> String {
     format!("{stem}.conflict-{}{extension}", &sha[..8])
 }
 
-// shortcut: unused until `live request` lands (plan Task 6); remove the allowance then.
-#[allow(dead_code)]
 pub fn request_name(root: &str, requester: &str, sha: &str, source: &str) -> String {
     let (_, extension) = split_extension(source);
     format!("{root}{requester}-{}{extension}", &sha[..8])

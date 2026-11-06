@@ -241,6 +241,7 @@ fn live_action(config: &Config, command: LiveAction) -> Result<()> {
             };
             live::sync::define(config, &tasks, &rules, policy)
         }
+        LiveAction::Request { bot_id, file } => live::sync::request(config, &bot_id, &file),
     }
 }
 
@@ -599,15 +600,25 @@ fn commit_candidate(
         "shared-v2",
         guard,
     )?;
-    store.compare_exchange(
-        expected,
-        &Head {
-            version: 2,
-            hub: config.hub.clone(),
-            revision,
-            snapshot,
-        },
-    )
+    let head = Head {
+        version: 2,
+        hub: config.hub.clone(),
+        revision,
+        snapshot,
+    };
+    let committed = store.compare_exchange(expected, &head)?;
+    if committed {
+        // Best effort: the head is already accepted, and a check whose cache holds it repairs a
+        // stale index.
+        let _ = live::sync::raise_hub(
+            config,
+            &HubMark {
+                revision,
+                snapshot: head.snapshot,
+            },
+        );
+    }
+    Ok(committed)
 }
 
 fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> {

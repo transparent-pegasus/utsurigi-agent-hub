@@ -2,7 +2,7 @@
 
 use crate::config::no_symlinks;
 use crate::error::{Error, Result};
-use crate::live::format::{HubMark, Spec};
+use crate::live::format::Spec;
 use crate::live::merge::Base;
 use crate::state::write_private;
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,6 @@ pub struct Live {
     pub base: BTreeMap<String, Base>,
     /// List revision written but not yet recorded in the hub index.
     pub pending_index: Option<u64>,
-    pub pending_hub: Option<HubMark>,
 }
 
 /// The index as last read: its token and hub revision.
