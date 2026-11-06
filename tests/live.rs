@@ -20,6 +20,12 @@ const NOT_LISTED: &str =
 const BACKWARDS: &str = "Live list revision went backwards; local files were left unchanged";
 const UNDECRYPTABLE: &str = "Live list cannot be decrypted with this repository password; delete uah-live/ from storage and define again";
 const SECONDARY: &str = "Secondary runtime: run live check; the primary runtime backs up Bot data";
+const REQUEST: &[u8] = "request from beta 日本語 plaintext-2f9a\n".as_bytes();
+const KNOWLEDGE: &[u8] = b"hub knowledge from alpha plaintext-5e7d\n";
+const PRIVATE_TARGET: &str = "Live requests require a shared target Bot";
+const NO_TASK_DIRECTORY: &str = "Target Bot accepts no live requests";
+// MAX_BYTES - 40: the largest plaintext whose sealed object fits MAX_BYTES.
+const REQUEST_LIMIT: usize = (1 << 20) - 40;
 
 fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -940,4 +946,375 @@ fn check_skips_symlinks_and_excluded_files_in_roots() {
     assert_eq!(check(&fixture, bot).paths("pushed"), ["tasks/a.md"]);
     assert_eq!(entries(&live_list(bot)).len(), 1);
     assert_opaque(bot, &[TASK, RULES, hidden[0].1, hidden[1].1, hidden[2].1]);
+}
+
+// Target alpha and requester beta are separate Bots of one hub.
+fn hub(shared: bool) -> (Fixture, Bot) {
+    let mut fixture = Fixture::new();
+    configure(&mut fixture.alpha, Some("machine-1"));
+    write(fixture.alpha.path("owned").join("RULES.md"), RULES);
+    fixture.alpha.config["sharing"]["bot_data"] = json!(shared);
+    fixture.alpha.save();
+    let beta = fixture.bot("beta", "beta-1");
+    fixture.registry(&fixture.alpha, &[&fixture.alpha, &beta]);
+    fixture.ok(&fixture.alpha, &["setup"]);
+    fixture.ok(&beta, &["setup"]);
+    (fixture, beta)
+}
+
+fn request_name(bytes: &[u8]) -> String {
+    format!("tasks/beta-{}.md", &sha256_hex(bytes)[..8])
+}
+
+// Beta files the request from outside both owned trees.
+fn request(fixture: &Fixture, beta: &Bot, file: &str, bytes: &[u8]) -> Output {
+    let path = beta.file.parent().unwrap().join("requests").join(file);
+    write(&path, bytes);
+    fixture.cli(
+        beta,
+        &["live", "request", "alpha", "--file", path.to_str().unwrap()],
+    )
+}
+
+fn hub_mark(head: &Value) -> Value {
+    json!({"revision": head["revision"], "snapshot": head["snapshot"]})
+}
+
+// Alpha publishes a shared edit from its accepted authoring base.
+fn publish_knowledge(fixture: &Fixture) {
+    let alpha = &fixture.alpha;
+    fixture.author_current(alpha);
+    write(alpha.path("shared").join("knowledge.md"), KNOWLEDGE);
+    fixture.ok(alpha, &["registry", "publish"]);
+}
+
+// Alpha on the fake R2: curl and restic both resolve to the local repositories.
+fn r2() -> (Fixture, Bot, PathBuf) {
+    let mut fixture = Fixture::new();
+    configure(&mut fixture.alpha, Some("machine-1"));
+    write(fixture.alpha.path("owned").join("RULES.md"), RULES);
+    let tool = Fixture::wrapper(&mut fixture.alpha);
+    let local = Bot {
+        file: fixture.alpha.file.clone(),
+        config: fixture.alpha.config.clone(),
+    };
+    for name in ["shared", "bot"] {
+        fs::write(tool.join(format!("repo-{name}")), local.repository(name)).unwrap();
+    }
+    let attestation = fixture.temp.path().join("attestation.json");
+    write(
+        &attestation,
+        json!({
+            "expires_at": "2999-01-01T00:00:00Z",
+            "repositories": [R2_SHARED, R2_BOT],
+            "max_source_bytes": 1_000_000,
+        })
+        .to_string(),
+    );
+    fs::set_permissions(&attestation, fs::Permissions::from_mode(0o600)).unwrap();
+    let alpha = &mut fixture.alpha;
+    alpha.config["storage"]["provider"] = json!("r2");
+    alpha.config["repositories"]["shared"]["url"] = json!(R2_SHARED);
+    alpha.config["repositories"]["bot"]["url"] = json!(R2_BOT);
+    alpha.config["budget"]["attestation_file"] = json!(attestation);
+    alpha.save();
+    // The fixture's helpers pass no credentials, so they come from the config-adjacent .env.
+    dotenv(
+        alpha,
+        format!("AWS_ACCESS_KEY_ID=synthetic-access-key\nAWS_SECRET_ACCESS_KEY={BOT_PASSWORD}\n"),
+    );
+    fixture.registry(&fixture.alpha, &[&fixture.alpha]);
+    fixture.fake_r2(
+        &fixture.alpha,
+        &[
+            ("shared", local.repository("shared")),
+            ("bot", local.repository("bot")),
+        ],
+    );
+    fixture.ok(&fixture.alpha, &["setup"]);
+    (fixture, local, tool)
+}
+
+#[test]
+fn request_reaches_shared_target() {
+    let (fixture, beta) = hub(true);
+    let alpha = &fixture.alpha;
+    write(alpha.path("owned").join("tasks/a.md"), TASK);
+    define(&fixture, alpha, &["--task", "tasks/"]);
+    assert_eq!(check(&fixture, alpha).paths("pushed"), ["tasks/a.md"]);
+    let before = live_list(alpha);
+
+    let name = request_name(REQUEST);
+    let output = request(&fixture, &beta, "request.md", REQUEST);
+    success(&output);
+    assert_eq!(json_line(&output), json!({"requested": name}));
+    let after = live_list(alpha);
+    let revision = after["revision"].as_u64().unwrap();
+    assert!(revision > before["revision"].as_u64().unwrap(), "{after}");
+    assert_eq!(hub_index(alpha)["bots"][bot_key().as_str()], revision);
+    // Existing entries stay byte-identical; the request only adds one.
+    let old = before["entries"].as_array().unwrap();
+    let new = after["entries"].as_array().unwrap();
+    assert!(old.iter().all(|entry| new.contains(entry)), "{after}");
+    assert_eq!(new.len(), old.len() + 1, "{after}");
+    let added: Vec<_> = entries(&after)
+        .difference(&entries(&before))
+        .cloned()
+        .collect();
+    assert_eq!(objects(alpha)[&added[0]].len(), REQUEST.len() + 40);
+    assert_opaque(alpha, &[TASK, REQUEST, name.as_bytes()]);
+
+    let pulled = check(&fixture, alpha);
+    assert_eq!(pulled.paths("pulled"), [name.as_str()]);
+    assert!(pulled.paths("pushed").is_empty(), "{}", pulled.report);
+    assert!(!pulled.conflicted(), "{}", pulled.report);
+    let path = alpha.path("owned").join(&name);
+    assert_eq!(fs::read(&path).unwrap(), REQUEST);
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(
+        fs::read(alpha.path("owned").join("tasks/a.md")).unwrap(),
+        TASK
+    );
+}
+
+#[test]
+fn request_to_private_target_is_rejected() {
+    let (fixture, beta) = hub(false);
+    let alpha = &fixture.alpha;
+    let cached = fixture.active_shared(&beta).join("registry.yaml");
+    let registry: Value = serde_saphyr::from_slice(&fs::read(cached).unwrap()).unwrap();
+    let entry = registry["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == "alpha")
+        .unwrap();
+    assert_eq!(entry["shared"], false, "beta's cached registry: {registry}");
+    // The target accepts requests in every other respect.
+    define(&fixture, alpha, &["--task", "tasks/"]);
+    let stored = remote(alpha);
+
+    let stderr = rejected(&request(&fixture, &beta, "request.md", REQUEST));
+    assert!(stderr.contains(PRIVATE_TARGET), "{stderr}");
+    assert_eq!(remote(alpha), stored, "no live write for a private target");
+}
+
+#[test]
+fn request_needs_a_task_directory() {
+    let (fixture, beta) = hub(true);
+    let alpha = &fixture.alpha;
+    write(alpha.path("owned").join("tasks/a.md"), TASK);
+    // A task file root and a rule directory root: neither takes requests.
+    define(
+        &fixture,
+        alpha,
+        &["--task", "tasks/a.md", "--rule", "notes/"],
+    );
+    let stored = remote(alpha);
+    let stderr = rejected(&request(&fixture, &beta, "request.md", REQUEST));
+    assert!(stderr.contains(NO_TASK_DIRECTORY), "{stderr}");
+    assert_eq!(remote(alpha), stored);
+
+    define(&fixture, alpha, &["--task", "tasks/"]);
+    let output = request(&fixture, &beta, "request.md", REQUEST);
+    success(&output);
+    assert_eq!(
+        json_line(&output),
+        json!({"requested": request_name(REQUEST)})
+    );
+}
+
+#[test]
+fn request_rejects_oversized_or_non_regular_files() {
+    let (fixture, beta) = hub(true);
+    let alpha = &fixture.alpha;
+    define(&fixture, alpha, &["--task", "tasks/"]);
+    let stored = remote(alpha);
+    let requests = beta.file.parent().unwrap().join("requests");
+    let limit = vec![b'r'; REQUEST_LIMIT];
+    write(requests.join("oversized.md"), [&limit[..], b"r"].concat());
+    write(requests.join("small.md"), REQUEST);
+    symlink(requests.join("small.md"), requests.join("linked.md")).unwrap();
+    fs::create_dir_all(requests.join("folder.md")).unwrap();
+    for file in ["oversized.md", "linked.md", "folder.md"] {
+        let path = requests.join(file);
+        rejected(&fixture.cli(
+            &beta,
+            &["live", "request", "alpha", "--file", path.to_str().unwrap()],
+        ));
+        assert_eq!(remote(alpha), stored, "{file} must not be requested");
+    }
+
+    let name = request_name(&limit);
+    let output = request(&fixture, &beta, "limit.md", &limit);
+    success(&output);
+    assert_eq!(json_line(&output), json!({"requested": name}));
+    assert_eq!(check(&fixture, alpha).paths("pulled"), [name.as_str()]);
+    assert_eq!(fs::read(alpha.path("owned").join(&name)).unwrap(), limit);
+}
+
+#[test]
+fn hub_publish_updates_index_and_peers_import() {
+    let (fixture, beta) = hub(true);
+    let alpha = &fixture.alpha;
+    // Setup's head CAS also marks the hub in the index.
+    let mut index = json!({
+        "version": 1,
+        "hub": hub_mark(&fixture.shared_head(alpha)),
+        "bots": {},
+    });
+    assert_eq!(hub_index(alpha), index);
+    define(&fixture, alpha, &["--task", "tasks/"]);
+    index["bots"][bot_key().as_str()] = json!(1);
+    assert_eq!(hub_index(alpha), index);
+    let before = fixture.active_shared(&beta);
+    let current = check(&fixture, &beta);
+    assert_eq!(current.report["hub_changed"], false, "{}", current.report);
+
+    fixture.ok(alpha, &["sync"]);
+    publish_knowledge(&fixture);
+    let head = fixture.shared_head(alpha);
+    index["hub"] = hub_mark(&head);
+    assert_eq!(hub_index(alpha), index, "publish marks the new head");
+
+    let changed = check(&fixture, &beta);
+    assert_eq!(changed.report["hub_changed"], true, "{}", changed.report);
+    let after = fixture.active_shared(&beta);
+    assert_ne!(after, before);
+    assert_eq!(
+        head["snapshot"],
+        after.file_name().unwrap().to_str().unwrap()
+    );
+    assert_eq!(fs::read(after.join("knowledge.md")).unwrap(), KNOWLEDGE);
+    let imported = check(&fixture, &beta);
+    assert_eq!(imported.report["hub_changed"], false, "{}", imported.report);
+}
+
+#[test]
+fn index_repair_follows_a_newer_cache() {
+    let fixture = primary();
+    let alpha = &fixture.alpha;
+    define(&fixture, alpha, &["--task", "tasks/"]);
+    let stale = hub_mark(&fixture.shared_head(alpha));
+    publish_knowledge(&fixture);
+    let current = hub_mark(&fixture.shared_head(alpha));
+    assert_ne!(stale, current);
+    let path = Path::new(alpha.repository("shared")).join("uah-live/index.json");
+    let mut index = stored_json(path.clone());
+    assert_eq!(index["hub"], current);
+    // As if an older CLI had published: the index keeps the previous head.
+    index["hub"] = stale;
+    fs::write(&path, serde_json::to_vec(&index).unwrap()).unwrap();
+
+    // Alpha's cache already holds the newer head, so the check imports nothing.
+    let repaired = check(&fixture, alpha);
+    assert_eq!(repaired.report["hub_changed"], false, "{}", repaired.report);
+    index["hub"] = current;
+    assert_eq!(hub_index(alpha), index);
+}
+
+#[test]
+fn failed_hub_mark_keeps_publish_successful_and_is_retried() {
+    let fixture = primary();
+    let alpha = &fixture.alpha;
+    define(&fixture, alpha, &["--task", "tasks/"]);
+    let before = fixture.shared_head(alpha);
+    let path = Path::new(alpha.repository("shared")).join("uah-live/index.json");
+    let index = fs::read(&path).unwrap();
+    // The local store reads and replaces only regular files, so the hub mark fails.
+    let aside = fixture.temp.path().join("index-aside.json");
+    fs::rename(&path, &aside).unwrap();
+    fs::create_dir(&path).unwrap();
+    publish_knowledge(&fixture);
+    let head = fixture.shared_head(alpha);
+    assert!(head["revision"].as_u64() > before["revision"].as_u64());
+    // Still an empty directory, so the old index returns unchanged.
+    fs::remove_dir(&path).unwrap();
+    fs::rename(&aside, &path).unwrap();
+
+    check(&fixture, alpha);
+    let mut expected: Value = serde_json::from_slice(&index).unwrap();
+    expected["hub"] = hub_mark(&head);
+    assert_eq!(hub_index(alpha), expected);
+}
+
+#[test]
+fn steady_state_check_reads_only_the_index() {
+    let (fixture, local, tool) = r2();
+    let bot = &fixture.alpha;
+    write(bot.path("owned").join("tasks/a.md"), TASK);
+    assert_eq!(
+        live(&fixture, bot, &["define", "--task", "tasks/"]),
+        json!({"defined": true, "revision": 1})
+    );
+    assert_eq!(check(&fixture, bot).paths("pushed"), ["tasks/a.md"]);
+    let list = live_list(&local);
+    assert_eq!(
+        objects(&local).into_keys().collect::<BTreeSet<_>>(),
+        entries(&list)
+    );
+    assert_eq!(
+        hub_index(&local)["bots"][bot_key().as_str()],
+        list["revision"]
+    );
+    assert_opaque(&local, &[TASK]);
+    // The push rewrote the index; this check absorbs that one change.
+    let settled = check(&fixture, bot);
+    assert!(settled.unchanged(), "{}", settled.report);
+    let log = fixture.temp.path().join("head-curl/requests.jsonl");
+    let traffic = fs::read_to_string(&log).unwrap();
+    for needle in ["tasks", "a.md", &sha256_hex(TASK)] {
+        assert!(!traffic.contains(needle), "a request URL exposes {needle}");
+    }
+
+    fs::write(&log, "").unwrap();
+    fs::write(tool.join("calls"), "").unwrap();
+    let steady = check(&fixture, bot);
+    assert!(steady.unchanged(), "{}", steady.report);
+    assert_eq!(steady.report["hub_changed"], false);
+    let index =
+        fs::read(Path::new(local.repository("shared")).join("uah-live/index.json")).unwrap();
+    let requests: Vec<Value> = fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        requests,
+        [json!({
+            "method": "GET",
+            "url": format!("{}/uah-live/index.json", R2_SHARED.strip_prefix("s3:").unwrap()),
+            "status": 304,
+            "conditions": {"if-none-match": [format!("\"{}\"", sha256_hex(&index))]},
+        })]
+    );
+    // Restic reaches storage too; only its local version probe may run.
+    let calls = fs::read_to_string(tool.join("calls")).unwrap();
+    assert!(calls.lines().all(|call| call == "version"), "{calls}");
+}
+
+#[test]
+fn restic_check_passes_after_live_objects() {
+    let fixture = primary();
+    let alpha = &fixture.alpha;
+    write(alpha.path("owned").join("tasks/a.md"), TASK);
+    write(alpha.path("owned").join("tasks/b.md"), b"b before\n");
+    define(&fixture, alpha, &["--task", "tasks/", "--rule", "RULES.md"]);
+    assert_eq!(
+        check(&fixture, alpha).paths("pushed"),
+        ["RULES.md", "tasks/a.md", "tasks/b.md"]
+    );
+    // A removal also deletes the object only the previous list referenced.
+    fs::remove_file(alpha.path("owned").join("tasks/a.md")).unwrap();
+    check(&fixture, alpha);
+    assert_eq!(objects(alpha).len(), 2);
+    assert!(
+        Path::new(alpha.repository("shared"))
+            .join("uah-live/index.json")
+            .is_file()
+    );
+    for repository in ["shared", "bot"] {
+        let output = fixture.restic(alpha, repository, &["check"]);
+        assert!(output.status.success(), "{repository}: {}", text(&output));
+    }
 }
