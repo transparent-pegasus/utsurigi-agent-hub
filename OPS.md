@@ -67,8 +67,10 @@ With `joined: true`, an initialized schedule without a current shared cache give
 Use `sync` for manual backup. Prefer native Bot scheduling to invoke
 `sync --scheduled` often enough to service `status.next_due`.
 The initial local-time anchor advances by fixed seconds, including across DST.
-A successful scheduled sync advances the due time; manual sync keeps it. On
-nonzero results, suspend automatic retries; inspect and reconcile before
+A successful scheduled sync advances the due time; manual sync keeps it.
+While another local operation (such as `live check`) holds the Bot state lock,
+`sync --scheduled` prints `{"skipped":true,"reason":"busy"}`; the next call retries.
+On nonzero results, suspend automatic retries; inspect and reconcile before
 resuming. A failed sync keeps its due time and does not authorize another write.
 Before sync/publication writes, the CLI saves `paths.state/pending-backup.yaml`.
 It clears this record only after remote verification, local publication, and any
