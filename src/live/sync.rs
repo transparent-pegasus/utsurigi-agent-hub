@@ -324,6 +324,8 @@ fn merge_list(
 ) -> Result<Option<Merged>> {
     let store = ObjectStore::new(config, url(&config.repositories.bot))?;
     let password = password(&config.repositories.bot)?;
+    // A list defined afresh has no base, yet the old base still shows the files unchanged here.
+    let previous = live.base.clone();
     'attempt: for _ in 0..CAS_ATTEMPTS {
         let Some((list, token)) = read_list(&store)? else {
             live.list = None;
@@ -427,6 +429,20 @@ fn merge_list(
                         && sha256_hex(content) == sha
                     {
                         base.insert(path, base_of(object.clone(), content));
+                        continue;
+                    }
+                    // Only a fresh list (new salt) gets here with a file unchanged since the
+                    // previous list: the remote edit is a pull, not a conflict.
+                    if previous.get(&path).is_some_and(|old| old.plain == sha)
+                        && let Some((object, content)) = theirs
+                    {
+                        base.insert(path.clone(), base_of(object, &content));
+                        applies.push(Apply {
+                            path,
+                            expected: Some(sha),
+                            content: Some(content),
+                            pulled: true,
+                        });
                         continue;
                     }
                     // The local version is saved under its own name before the path changes.
@@ -671,17 +687,28 @@ pub fn define(config: &Config, tasks: &[String], rules: &[String], policy: Polic
     let mut live = Live::load(root)?.unwrap_or_default();
     let cached = joined(config)?;
     let store = ObjectStore::new(config, url(&config.repositories.bot))?;
+    let shared = ObjectStore::new(config, url(&config.repositories.shared))?;
     let password = password(&config.repositories.bot)?;
     for _ in 0..CAS_ATTEMPTS {
         let current = read_list(&store)?;
         let mut obsolete = Vec::new();
         let next = match &current {
             None => {
+                // Peers read the list only when this Bot's index entry changes, and the index
+                // keeps the highest revision, so a re-created list must start above that entry.
+                let listed = read_index(&shared, None)?
+                    .flatten()
+                    .and_then(|(index, _)| {
+                        index.bots.get(&bot_key(&config.hub, config.id())).copied()
+                    })
+                    .unwrap_or(0);
                 let salt = crypto::salt()?;
                 let key = crypto::derive(password.as_encoded_bytes(), &salt)?;
                 List {
                     version: 1,
-                    revision: 1,
+                    revision: listed
+                        .checked_add(1)
+                        .ok_or_else(|| Error::new("Live list revision overflow"))?,
                     salt: hex(&salt),
                     spec: seal_spec(&key, config, &spec)?,
                     entries: Vec::new(),
@@ -727,7 +754,6 @@ pub fn define(config: &Config, tasks: &[String], rules: &[String], policy: Polic
         // New roots sync at the next scheduled call rather than after the previous interval.
         live.next_check = live.next_check.min(Utc::now().timestamp());
         live.save(root)?;
-        let shared = ObjectStore::new(config, url(&config.repositories.shared))?;
         update_index(config, &shared, &mut live, None, &cached)?;
         live.save(root)?;
         for sha in &obsolete {
