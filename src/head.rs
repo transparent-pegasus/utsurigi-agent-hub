@@ -10,6 +10,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const HEAD_NAME: &str = "uah-head.json";
+const SUBJECT: &str = "Shared head";
 const BODY_LIMIT: u64 = 16 * 1024;
 const HEADER_LIMIT: u64 = 64 * 1024;
 const TOKEN_LIMIT: usize = 1024;
@@ -35,7 +36,7 @@ pub struct HeadStore {
     timeout: Duration,
 }
 
-enum Backend {
+pub(crate) enum Backend {
     Local(PathBuf),
     R2(String),
 }
@@ -54,7 +55,7 @@ impl HeadStore {
         config.validate_url(repository)?;
         let backend = match config.storage.provider.as_str() {
             "local" => Backend::Local(PathBuf::from(repository)),
-            "r2" => Backend::R2(r2_url(repository)?),
+            "r2" => Backend::R2(format!("{}/{HEAD_NAME}", r2_base(repository, SUBJECT)?)),
             _ => return Err(Error::new("Unsupported head storage provider")),
         };
         Ok(Self {
@@ -68,9 +69,10 @@ impl HeadStore {
         match &self.backend {
             Backend::Local(root) => self.read_local(root),
             Backend::R2(url) => {
-                let response = request(url, None, None, self.timeout)?.ok_or_else(|| {
-                    Error::new("Shared head GET transport failed; retry the read")
-                })?;
+                let response = request("GET", url, &[], None, BODY_LIMIT, self.timeout)?
+                    .ok_or_else(|| {
+                        Error::new("Shared head GET transport failed; retry the read")
+                    })?;
                 match response.status {
                     404 => Ok(None),
                     200 => {
@@ -99,9 +101,15 @@ impl HeadStore {
         } else if next.revision != 1 {
             return Err(Error::new("Initial shared head revision must be one"));
         }
+        let body = serde_json::to_vec(next).map_err(|_| Error::new("Cannot encode shared head"))?;
         match &self.backend {
             Backend::Local(root) => {
-                let _lock = local_lock(root, self.timeout.min(Duration::from_secs(30)))?;
+                let _lock = local_lock(
+                    root,
+                    "uah-head.lock",
+                    SUBJECT,
+                    self.timeout.min(Duration::from_secs(30)),
+                )?;
                 let current = self.read_local(root)?;
                 let matches = match (expected, current.as_ref()) {
                     (None, None) => true,
@@ -113,17 +121,7 @@ impl HeadStore {
                 if !matches {
                     return Ok(false);
                 }
-                let mut temporary = tempfile::NamedTempFile::new_in(root)?;
-                private_file(temporary.as_file(), temporary.path())?;
-                serde_json::to_writer(&mut temporary, next)
-                    .map_err(|_| Error::new("Cannot encode shared head"))?;
-                temporary.flush()?;
-                temporary.as_file().sync_all()?;
-                no_symlinks(&root.join(HEAD_NAME))?;
-                temporary
-                    .persist(root.join(HEAD_NAME))
-                    .map_err(|_| Error::new("Cannot atomically replace shared head"))?;
-                File::open(root)?.sync_all()?;
+                replace_private(root, &root.join(HEAD_NAME), &body, SUBJECT)?;
                 Ok(true)
             }
             Backend::R2(url) => {
@@ -135,9 +133,14 @@ impl HeadStore {
                 } else {
                     "If-None-Match: *".to_owned()
                 };
-                let body = serde_json::to_vec(next)
-                    .map_err(|_| Error::new("Cannot encode shared head"))?;
-                match request(url, Some(&condition), Some(&body), self.timeout)? {
+                match request(
+                    "PUT",
+                    url,
+                    &["Content-Type: application/json", &condition],
+                    Some(&body),
+                    BODY_LIMIT,
+                    self.timeout,
+                )? {
                     Some(response) => match response.status {
                         200 | 201 | 204 => Ok(true),
                         412 => Ok(false),
@@ -180,31 +183,68 @@ impl HeadStore {
     }
 
     fn read_local(&self, root: &Path) -> Result<Option<ObservedHead>> {
-        local_root(root)?;
-        let path = root.join(HEAD_NAME);
-        no_symlinks(&path)?;
-        let mut options = local_options();
-        options.read(true);
-        let file = match options.open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
+        let Some((bytes, token)) = read_private(root, &root.join(HEAD_NAME), BODY_LIMIT, SUBJECT)?
+        else {
+            return Ok(None);
         };
-        regular_file(&file)?;
-        let bytes = read_bounded(&file, BODY_LIMIT)?;
         Ok(Some(ObservedHead {
             head: self.decode(&bytes)?,
-            // This token identifies the exact bytes observed, including formatting.
-            token: format!("{:x}", Sha256::digest(&bytes)),
+            token,
         }))
     }
 }
 
-fn local_root(root: &Path) -> Result<()> {
+fn local_root(root: &Path, subject: &str) -> Result<()> {
     no_symlinks(root)?;
     if !fs::metadata(root)?.is_dir() {
-        return Err(Error::new("Shared head repository must be a directory"));
+        return Err(Error::new(format!(
+            "{subject} repository must be a directory"
+        )));
     }
+    Ok(())
+}
+
+pub(crate) fn read_private(
+    root: &Path,
+    path: &Path,
+    limit: u64,
+    subject: &str,
+) -> Result<Option<(Vec<u8>, String)>> {
+    local_root(root, subject)?;
+    no_symlinks(path)?;
+    let mut options = local_options();
+    options.read(true);
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    regular_file(&file, subject)?;
+    let bytes = read_bounded(&file, limit, subject)?;
+    // This token identifies the exact bytes observed, including formatting.
+    let token = format!("{:x}", Sha256::digest(&bytes));
+    Ok(Some((bytes, token)))
+}
+
+pub(crate) fn replace_private(
+    directory: &Path,
+    path: &Path,
+    bytes: &[u8],
+    subject: &str,
+) -> Result<()> {
+    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+    private_file(temporary.as_file(), temporary.path())?;
+    temporary.write_all(bytes)?;
+    temporary.flush()?;
+    temporary.as_file().sync_all()?;
+    no_symlinks(path)?;
+    temporary.persist(path).map_err(|_| {
+        Error::new(format!(
+            "Cannot atomically replace {}",
+            subject.to_lowercase()
+        ))
+    })?;
+    File::open(directory)?.sync_all()?;
     Ok(())
 }
 
@@ -221,25 +261,34 @@ fn local_options() -> OpenOptions {
     options
 }
 
-fn regular_file(file: &File) -> Result<()> {
+fn regular_file(file: &File, subject: &str) -> Result<()> {
     let metadata = file.metadata()?;
     if !metadata.is_file() {
-        return Err(Error::new("Shared head and lock must be regular files"));
+        return Err(Error::new(format!(
+            "{subject} and lock must be regular files"
+        )));
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         // A reader may still hold the old inode after an atomic replacement.
         if metadata.nlink() > 1 {
-            return Err(Error::new("Shared head and lock must not have hard links"));
+            return Err(Error::new(format!(
+                "{subject} and lock must not have hard links"
+            )));
         }
     }
     Ok(())
 }
 
-fn local_lock(root: &Path, timeout: Duration) -> Result<File> {
-    local_root(root)?;
-    let path = root.join("uah-head.lock");
+pub(crate) fn local_lock(
+    root: &Path,
+    name: &str,
+    subject: &str,
+    timeout: Duration,
+) -> Result<File> {
+    local_root(root, subject)?;
+    let path = root.join(name);
     no_symlinks(&path)?;
     let file = local_options()
         .create(true)
@@ -247,7 +296,7 @@ fn local_lock(root: &Path, timeout: Duration) -> Result<File> {
         .read(true)
         .write(true)
         .open(&path)?;
-    regular_file(&file)?;
+    regular_file(&file, subject)?;
     private_file(&file, &path)?;
     let started = Instant::now();
     loop {
@@ -257,31 +306,36 @@ fn local_lock(root: &Path, timeout: Duration) -> Result<File> {
                 std::thread::sleep(Duration::from_millis(10));
             }
             Err(TryLockError::WouldBlock) => {
-                return Err(Error::new(
-                    "Timed out waiting for shared head CAS lock; retry",
-                ));
+                return Err(Error::new(format!(
+                    "Timed out waiting for {} CAS lock; retry",
+                    subject.to_lowercase()
+                )));
             }
             Err(TryLockError::Error(_)) => {
-                return Err(Error::new("Cannot acquire shared head CAS lock"));
+                return Err(Error::new(format!(
+                    "Cannot acquire {} CAS lock",
+                    subject.to_lowercase()
+                )));
             }
         }
     }
 }
 
-fn read_bounded(file: &File, limit: u64) -> Result<Vec<u8>> {
+fn read_bounded(file: &File, limit: u64, subject: &str) -> Result<Vec<u8>> {
+    let exceeded = || Error::new(format!("{subject} response exceeds its size limit"));
     if file.metadata()?.len() > limit {
-        return Err(Error::new("Shared head response exceeds its size limit"));
+        return Err(exceeded());
     }
     let mut bytes = Vec::new();
     file.take(limit + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > limit {
-        return Err(Error::new("Shared head response exceeds its size limit"));
+        return Err(exceeded());
     }
     Ok(bytes)
 }
 
-fn r2_url(repository: &str) -> Result<String> {
-    let invalid = || Error::new("Invalid HTTPS shared head endpoint");
+pub(crate) fn r2_base(repository: &str, subject: &str) -> Result<String> {
+    let invalid = || Error::new(format!("Invalid HTTPS {} endpoint", subject.to_lowercase()));
     let endpoint = repository.strip_prefix("s3:https://").ok_or_else(invalid)?;
     let (authority, path) = endpoint.split_once('/').ok_or_else(invalid)?;
     if authority.len() > 512 {
@@ -350,10 +404,10 @@ fn r2_url(repository: &str) -> Result<String> {
             return Err(invalid());
         }
     }
-    Ok(format!("https://{authority}/{path}/{HEAD_NAME}"))
+    Ok(format!("https://{authority}/{path}"))
 }
 
-fn strong_etag(value: &str) -> bool {
+pub(crate) fn strong_etag(value: &str) -> bool {
     let bytes = value.as_bytes();
     bytes.len() >= 2
         && bytes.len() <= TOKEN_LIMIT
@@ -370,15 +424,15 @@ fn http_error(method: &str, status: u16) -> Error {
     ))
 }
 
-struct Response {
-    status: u16,
-    etag: Option<String>,
-    body: Vec<u8>,
+pub(crate) struct Response {
+    pub(crate) status: u16,
+    pub(crate) etag: Option<String>,
+    pub(crate) body: Vec<u8>,
 }
 
 fn option(config: &mut String, name: &str, value: &str) -> Result<()> {
     if value.len() > 16 * 1024 || value.chars().any(char::is_control) {
-        return Err(Error::new("Invalid shared head transport option"));
+        return Err(Error::new("Invalid R2 transport option"));
     }
     config.push_str(name);
     config.push_str(" = \"");
@@ -402,27 +456,30 @@ fn credential(name: &str) -> Result<String> {
 }
 
 // None means a request was started but no trustworthy complete response arrived.
-// Callers must reconcile a PUT using an exact read of the intended head.
-fn request(
+// Callers must never replay a PUT; they reconcile it using an exact read.
+// `limit` bounds both the uploaded and the response body.
+pub(crate) fn request(
+    method: &str,
     url: &str,
-    condition: Option<&str>,
+    headers: &[&str],
     body: Option<&[u8]>,
+    limit: u64,
     timeout: Duration,
 ) -> Result<Option<Response>> {
-    let directory = tempfile::Builder::new().prefix("uah-head-").tempdir()?;
+    let directory = tempfile::Builder::new().prefix("uah-r2-").tempdir()?;
     no_symlinks(directory.path())?;
     let mut response_body = tempfile::NamedTempFile::new_in(directory.path())?;
-    let mut headers = tempfile::NamedTempFile::new_in(directory.path())?;
+    let mut response_headers = tempfile::NamedTempFile::new_in(directory.path())?;
     let mut status = tempfile::NamedTempFile::new_in(directory.path())?;
     let mut upload = tempfile::NamedTempFile::new_in(directory.path())?;
-    for file in [&response_body, &headers, &status, &upload] {
+    for file in [&response_body, &response_headers, &status, &upload] {
         private_file(file.as_file(), file.path())?;
     }
     let mut config = String::from(
         "silent\ngloboff\nsuppress-connect-headers\nproto = \"=https\"\nproto-redir = \"=https\"\nconnect-timeout = \"15\"\n",
     );
     option(&mut config, "max-time", &timeout.as_secs().to_string())?;
-    option(&mut config, "max-filesize", &BODY_LIMIT.to_string())?;
+    option(&mut config, "max-filesize", &limit.to_string())?;
     option(&mut config, "url", url)?;
     option(&mut config, "aws-sigv4", "aws:amz:auto:s3")?;
     let access = credential("AWS_ACCESS_KEY_ID")?;
@@ -451,37 +508,40 @@ fn request(
         if let Some(path) = std::env::var_os(name) {
             let path = path
                 .into_string()
-                .map_err(|_| Error::new("Invalid head TLS option"))?;
+                .map_err(|_| Error::new("Invalid R2 TLS option"))?;
             option(&mut config, target, &path)?;
         }
     }
-    for (name, file) in [("output", &response_body), ("dump-header", &headers)] {
+    for (name, file) in [
+        ("output", &response_body),
+        ("dump-header", &response_headers),
+    ] {
         option(
             &mut config,
             name,
             file.path()
                 .to_str()
-                .ok_or_else(|| Error::new("Invalid head temporary path"))?,
+                .ok_or_else(|| Error::new("Invalid R2 temporary path"))?,
         )?;
     }
     option(&mut config, "write-out", "%{http_code}")?;
-    option(
-        &mut config,
-        "request",
-        if body.is_some() { "PUT" } else { "GET" },
-    )?;
+    option(&mut config, "request", method)?;
+    if method == "PUT"
+        && !headers
+            .iter()
+            .any(|header| header.starts_with("If-Match: ") || header.starts_with("If-None-Match: "))
+    {
+        return Err(Error::new("Missing R2 PUT CAS condition"));
+    }
+    for header in headers {
+        option(&mut config, "header", header)?;
+    }
     if let Some(body) = body {
-        if body.len() as u64 > BODY_LIMIT {
-            return Err(Error::new("Shared head request exceeds its size limit"));
+        if body.len() as u64 > limit {
+            return Err(Error::new("R2 request exceeds its size limit"));
         }
         upload.write_all(body)?;
         upload.flush()?;
-        option(&mut config, "header", "Content-Type: application/json")?;
-        option(
-            &mut config,
-            "header",
-            condition.ok_or_else(|| Error::new("Missing head CAS condition"))?,
-        )?;
         option(
             &mut config,
             "data-binary",
@@ -490,13 +550,13 @@ fn request(
                 upload
                     .path()
                     .to_str()
-                    .ok_or_else(|| Error::new("Invalid head temporary path"))?
+                    .ok_or_else(|| Error::new("Invalid R2 temporary path"))?
             ),
         )?;
     }
     if config.len() > 32 * 1024 {
         return Err(Error::new(
-            "Shared head transport configuration exceeds its size limit",
+            "R2 transport configuration exceeds its size limit",
         ));
     }
     let mut command = Command::new("curl");
@@ -514,15 +574,15 @@ fn request(
             command.env(name, value);
         }
     }
-    bound_child_files(&mut command)?;
-    let mut child = command.spawn().map_err(|_| {
-        Error::new("Shared head transport requires curl with HTTPS and AWS SigV4 support")
-    })?;
+    bound_child_files(&mut command, HEADER_LIMIT.max(limit))?;
+    let mut child = command
+        .spawn()
+        .map_err(|_| Error::new("R2 transport requires curl with HTTPS and AWS SigV4 support"))?;
     let input = child.stdin.take().expect("piped curl stdin");
     if nonblocking(&input).is_err() {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(Error::new("Cannot prepare bounded shared head transport"));
+        return Err(Error::new("Cannot prepare bounded R2 transport"));
     }
     let started = Instant::now();
     let mut remaining = config.as_bytes();
@@ -562,10 +622,10 @@ fn request(
     finish_request(
         child,
         completed,
-        started,
-        timeout,
+        started + timeout,
+        limit,
         &mut response_body,
-        &mut headers,
+        &mut response_headers,
         &mut status,
     )
 }
@@ -573,8 +633,8 @@ fn request(
 fn finish_request(
     mut child: std::process::Child,
     completed: Option<bool>,
-    started: Instant,
-    timeout: Duration,
+    deadline: Instant,
+    limit: u64,
     body: &mut tempfile::NamedTempFile,
     headers: &mut tempfile::NamedTempFile,
     status: &mut tempfile::NamedTempFile,
@@ -585,7 +645,7 @@ fn finish_request(
         loop {
             match child.try_wait() {
                 Ok(Some(exit)) => break exit.success(),
-                Ok(None) if started.elapsed() < timeout => {
+                Ok(None) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(10))
                 }
                 _ => {
@@ -603,27 +663,30 @@ fn finish_request(
         for file in [&mut *body, &mut *headers, &mut *status] {
             file.seek(SeekFrom::Start(0))?;
         }
-        let status_bytes = read_bounded(status.as_file(), 3)?;
-        let status_text = std::str::from_utf8(&status_bytes)
-            .map_err(|_| Error::new("Invalid head HTTP status"))?;
+        let status_bytes = read_bounded(status.as_file(), 3, "R2")?;
+        let status_text =
+            std::str::from_utf8(&status_bytes).map_err(|_| Error::new("Invalid R2 HTTP status"))?;
         if status_bytes.len() != 3 || !status_bytes.iter().all(u8::is_ascii_digit) {
-            return Err(Error::new("Invalid head HTTP status"));
+            return Err(Error::new("Invalid R2 HTTP status"));
         }
         let status = status_text
             .parse::<u16>()
-            .map_err(|_| Error::new("Invalid head HTTP status"))?;
-        let etag = parse_headers(&read_bounded(headers.as_file(), HEADER_LIMIT)?, status)?;
+            .map_err(|_| Error::new("Invalid R2 HTTP status"))?;
+        let etag = parse_headers(
+            &read_bounded(headers.as_file(), HEADER_LIMIT, "R2")?,
+            status,
+        )?;
         Ok(Response {
             status,
             etag,
-            body: read_bounded(body.as_file(), BODY_LIMIT)?,
+            body: read_bounded(body.as_file(), limit, "R2")?,
         })
     };
     Ok(parse().ok())
 }
 
 fn parse_headers(bytes: &[u8], status: u16) -> Result<Option<String>> {
-    let invalid = || Error::new("Invalid shared head HTTP headers");
+    let invalid = || Error::new("Invalid R2 HTTP headers");
     let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
     let mut final_status = None;
     let mut etag = None;
@@ -698,12 +761,12 @@ fn nonblocking(input: &std::process::ChildStdin) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-fn bound_child_files(command: &mut Command) -> Result<()> {
+fn bound_child_files(command: &mut Command, file_limit: u64) -> Result<()> {
     use std::os::unix::process::CommandExt;
     // SAFETY: the child hook only calls async-signal-safe setrlimit and constructs
     // an OS error on failure. It does not touch parent process limits.
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
             let no_core = libc::rlimit {
                 rlim_cur: 0,
                 rlim_max: 0,
@@ -712,8 +775,8 @@ fn bound_child_files(command: &mut Command) -> Result<()> {
                 return Err(std::io::Error::last_os_error());
             }
             let limit = libc::rlimit {
-                rlim_cur: HEADER_LIMIT as libc::rlim_t,
-                rlim_max: HEADER_LIMIT as libc::rlim_t,
+                rlim_cur: file_limit as libc::rlim_t,
+                rlim_max: file_limit as libc::rlim_t,
             };
             if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
                 return Err(std::io::Error::last_os_error());
@@ -725,9 +788,9 @@ fn bound_child_files(command: &mut Command) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn bound_child_files(_: &mut Command) -> Result<()> {
+fn bound_child_files(_: &mut Command, _: u64) -> Result<()> {
     Err(Error::new(
-        "Bounded shared head transport requires a supported Unix host",
+        "Bounded R2 transport requires a supported Unix host",
     ))
 }
 
