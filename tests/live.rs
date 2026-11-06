@@ -714,6 +714,43 @@ fn lower_list_revision_is_rejected() {
 }
 
 #[test]
+fn redefined_list_after_storage_reset_reaches_peers() {
+    let (fixture, secondary) = machines();
+    let primary = &fixture.alpha;
+    synced(&fixture, &secondary, &[("tasks/a.md", TASK)]);
+    let indexed = hub_index(primary)["bots"][bot_key().as_str()]
+        .as_u64()
+        .unwrap();
+
+    // The documented recovery: delete uah-live/ from the Bot's storage, then define again.
+    let storage = Path::new(primary.repository("bot")).join("uah-live");
+    fs::remove_file(storage.join("list.json")).unwrap();
+    fs::remove_dir_all(storage.join("objects")).unwrap();
+    let redefined = define(&fixture, primary, &["--task", "tasks/"]);
+    let added: &[u8] = b"written after the storage reset\n";
+    write(primary.path("owned").join("tasks/b.md"), added);
+    assert_eq!(
+        check(&fixture, primary).paths("pushed"),
+        ["tasks/a.md", "tasks/b.md"]
+    );
+
+    let pulled = check(&fixture, &secondary);
+    assert_eq!(pulled.paths("pulled"), ["tasks/b.md"], "{}", pulled.report);
+    assert!(!pulled.conflicted(), "{}", pulled.report);
+    assert_eq!(
+        tasks(&secondary),
+        BTreeMap::from([
+            ("a.md".to_owned(), TASK.to_vec()),
+            ("b.md".to_owned(), added.to_vec()),
+        ])
+    );
+    assert!(
+        redefined > indexed,
+        "a re-created list must start above the index entry {indexed}: revision {redefined}"
+    );
+}
+
+#[test]
 fn define_rejects_roots_outside_include_symlinked_or_excluded() {
     let mut fixture = primary();
     let owned = fixture.alpha.path("owned");
@@ -825,6 +862,32 @@ fn check_while_another_operation_runs_reports_busy() {
     );
     assert!(objects(bot).is_empty());
     assert_eq!(check(&fixture, bot).paths("pushed"), ["tasks/a.md"]);
+}
+
+// A live check holds the Bot state lock; a scheduled sync then must not count as a failure.
+#[test]
+fn scheduled_sync_skips_while_bot_state_is_busy() {
+    let fixture = primary();
+    let bot = &fixture.alpha;
+    let file = bot.path("state").join("status.json");
+    let mut state: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    state["next_due"] = json!(Utc::now().timestamp() - 1);
+    fs::write(&file, state.to_string()).unwrap();
+    let bytes = fs::read(&file).unwrap();
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(bot.path("state").join("operation.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let output = fixture.cli(bot, &["sync", "--scheduled"]);
+    drop(lock);
+    success(&output);
+    assert_eq!(
+        json_line(&output),
+        json!({"skipped": true, "reason": "busy"})
+    );
+    assert_eq!(fs::read(&file).unwrap(), bytes);
 }
 
 #[test]
