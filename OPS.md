@@ -110,7 +110,9 @@ else `rule_idle_seconds` (600), with ±10% jitter; set them with `live define`.
 Failures back off and retry; `status.live.failure` names the cause.
 
 Edits on two runtimes between checks keep both: the path takes the stored version,
-and the local edit becomes `NAME.conflict-HASH8.EXT` for the Bot to merge.
+and the local edit becomes `NAME.conflict-HASH8.EXT` for the Bot to merge. Copies
+inside a task or rule directory sync like other files; a copy of a single-file
+root stays on the runtime that saw the conflict.
 `live request BOT_ID --file PATH` adds a new file to a shared Bot's first task
 directory and never edits existing files; it needs the target's password and write
 access. Cost: one R2 Class B read per check per Bot runtime, so 50 Bots on two
