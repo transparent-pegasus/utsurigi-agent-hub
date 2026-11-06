@@ -743,3 +743,7 @@ mod tests {
         assert_eq!(omitted, template);
     }
 }
+
+#[cfg(test)]
+#[path = "config_tests.rs"]
+mod machine_tests;

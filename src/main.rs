@@ -4,7 +4,13 @@ mod decisions;
 mod error;
 mod head;
 mod history;
+// shortcut: dead_code allowed until the live CLI wiring lands (plan Task 5); remove then.
+#[allow(dead_code)]
+mod live;
 mod migration;
+// shortcut: dead_code allowed until the live CLI wiring lands (plan Task 5); remove then.
+#[allow(dead_code)]
+mod objects;
 mod operations;
 mod registry;
 mod restic;

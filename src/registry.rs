@@ -342,3 +342,7 @@ impl Registry {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "registry_tests.rs"]
+mod tests;
