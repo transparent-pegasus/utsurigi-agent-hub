@@ -42,8 +42,6 @@ pub struct Entry {
     pub machines: Vec<String>,
 }
 
-// shortcut: dead_code allowed until the live CLI wiring lands (plan Task 5); remove then.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
     Primary,
@@ -265,8 +263,6 @@ impl Registry {
     }
 
     // Raw Bot fields, not `id()`: `status` may ask before configuration is complete.
-    // shortcut: dead_code allowed until the live CLI wiring lands (plan Task 5); remove then.
-    #[allow(dead_code)]
     pub fn role(&self, config: &Config) -> Option<Role> {
         let entry = self.entry(config.bot.id.as_deref()?).ok()?;
         if config.bot.runtime_id.as_deref() == Some(entry.runtime_id.as_str()) {

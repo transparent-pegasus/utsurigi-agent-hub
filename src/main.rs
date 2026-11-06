@@ -4,12 +4,8 @@ mod decisions;
 mod error;
 mod head;
 mod history;
-// shortcut: dead_code allowed until the live CLI wiring lands (plan Task 5); remove then.
-#[allow(dead_code)]
 mod live;
 mod migration;
-// shortcut: dead_code allowed until the live CLI wiring lands (plan Task 5); remove then.
-#[allow(dead_code)]
 mod objects;
 mod operations;
 mod registry;
@@ -71,6 +67,10 @@ enum Action {
     },
     Prune,
     Status,
+    Live {
+        #[command(subcommand)]
+        command: LiveAction,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -83,6 +83,24 @@ enum RegistryAction {
     Publish {
         #[arg(long)]
         takeover: bool,
+    },
+}
+#[derive(Subcommand)]
+enum LiveAction {
+    Check,
+    Define {
+        #[arg(long = "task")]
+        tasks: Vec<String>,
+        #[arg(long = "rule")]
+        rules: Vec<String>,
+        #[arg(long)]
+        base_seconds: Option<u64>,
+        #[arg(long)]
+        idle_after_seconds: Option<u64>,
+        #[arg(long)]
+        task_idle_seconds: Option<u64>,
+        #[arg(long)]
+        rule_idle_seconds: Option<u64>,
     },
 }
 
