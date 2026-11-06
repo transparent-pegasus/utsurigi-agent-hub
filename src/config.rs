@@ -728,6 +728,20 @@ impl Config {
             .as_deref()
             .expect("runtime configuration")
     }
+
+    // Hub-scoped: registries never carry a raw machine ID or link one machine across hubs.
+    // shortcut: dead_code allowed until the live CLI wiring lands (plan Task 5); remove then.
+    #[allow(dead_code)]
+    pub fn machine_hash(&self) -> Option<String> {
+        let id = self.machine.id.as_deref()?;
+        let digest = Sha256::new()
+            .chain_update(b"utsurigi-agent-hub machine v1\0")
+            .chain_update(&self.hub)
+            .chain_update(b"\0")
+            .chain_update(id)
+            .finalize();
+        Some(format!("{digest:x}"))
+    }
 }
 
 #[cfg(test)]
