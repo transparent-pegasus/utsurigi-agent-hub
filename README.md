@@ -1,6 +1,9 @@
 # utsurigi-agent-hub
 
-Use cloud storage for Bot data. No need to repeat yourself to another Bot. Switch Bots easily.
+Keep Bot data in one external store. Then:
+
+- Send tasks to Bots on other services. Share knowledge with them.
+- Use the same Bot on other services.
 
 Give your Bot the [Bot instructions](BOT.md) to get started.
 Setup, operations, and recovery guides load only when needed:
@@ -19,6 +22,8 @@ Read BOT.md first, then INIT.md; follow their references to other Markdown guide
 
 - External data: encrypted storage and recovery, through R2 or the Bot.
 - Named hubs: choose each Bot's hub during setup.
+- Live sync: tasks and rules reach the Bot's other machines and peers within
+  minutes, one read per check. See [OPS](OPS.md#live-sync).
 - Periodic review: prefer native Bot features when equivalent or better.
 - Setup through dialogue.
 - [YAML configuration](config.yaml).

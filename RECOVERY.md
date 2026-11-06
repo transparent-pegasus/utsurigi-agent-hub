@@ -53,6 +53,15 @@ stop old runtimes/readers, verify the new `status.active_shared` references, and
 identify each cache as an old CLI artifact. Remove only those identified caches;
 never delete arbitrary imports in bulk.
 
+## Live sync
+
+A failed `live check` keeps local files and retries after backoff; correct the
+authentication, configuration, or integrity error it names. "Live list revision went
+backwards" means an older `list.json` replaced a newer one: restore the newer copy, or
+delete `uah-live/` and run `live define` from a runtime with current files. After a
+password change, old live data cannot be decrypted: delete `uah-live/` from storage,
+then run `live define`. Merge `*.conflict-*` copies and delete them.
+
 ## Restore and handover
 
 Before handover, preserve unfinished work and stop the old runtime. Update Bot
