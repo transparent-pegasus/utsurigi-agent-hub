@@ -132,7 +132,17 @@ pub fn execute(path: &Path, action: Action) -> Result<()> {
     let Some(root) = config.paths.state.as_ref() else {
         return config.runtime();
     };
-    let _lock = Lock::acquire(root)?;
+    let _lock = if matches!(action, Action::Sync { scheduled: true }) {
+        // Hosts suspend retries after a nonzero exit; a busy Bot (e.g. a live check) is not a
+        // failure, so the next scheduled call retries.
+        let Some(lock) = Lock::try_acquire(root)? else {
+            println!("{}", serde_json::json!({"skipped": true, "reason": "busy"}));
+            return Ok(());
+        };
+        lock
+    } else {
+        Lock::acquire(root)?
+    };
     let mut state = State::load(root, &config.hub)?;
     // A skipped scheduled operation must leave every unresolved failure intact.
     if matches!(action, Action::Sync { scheduled: true })
