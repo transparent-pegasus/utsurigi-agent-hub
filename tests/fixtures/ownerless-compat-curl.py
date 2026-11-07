@@ -1,9 +1,11 @@
 #!/usr/bin/python3
-"""Offline GET/conditional-PUT adapter for the compatibility tests' fake R2.
+"""Offline GET/conditional-PUT/DELETE adapter for the compatibility tests' fake R2.
 
 Installed as <fixture>/bin/curl; fixture.json names one exact head URL and a
-head_path inside the generated local restic repository. No network code exists.
-The config parser follows the independent ownerless head fixture's curl grammar.
+head_path inside the generated local restic repository, plus optional "live"
+repository base URLs whose uah-live/ keys map to the same keys under a local
+directory. No network code exists. The config parser follows the independent
+ownerless head fixture's curl grammar.
 """
 
 import fcntl
@@ -133,12 +135,25 @@ def upload_body(options):
     return b""
 
 
+def live_path(fixture, url):
+    for base, directory in fixture.get("live", {}).items():
+        if url.startswith(base + "/"):
+            key = url[len(base) + 1:]
+            segments = key.split("/")
+            if (segments[0] != "uah-live" or not 2 <= len(segments) <= 8 or len(key) > 512
+                    or any(segment in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]+", segment)
+                           for segment in segments)):
+                raise ValueError("invalid live object key")
+            return Path(directory) / key
+    raise ValueError("unexpected URL")
+
+
 def request(root, arguments, document):
     options = parse_request(arguments, document)
     fixture = json.loads((root / "fixture.json").read_text())
-    if one(options, "url") != fixture["url"]:
-        raise ValueError("unexpected URL")
-    head_path = Path(fixture["head_path"])
+    url = one(options, "url") or ""
+    head = url == fixture["url"]
+    target = Path(fixture["head_path"]) if head else live_path(fixture, url)
     default_method = "PUT" if one(options, "upload-file") is not None else "GET"
     if default_method == "GET" and any(key in ("data", "data-binary", "data-raw") for key, _ in options):
         default_method = "POST"
@@ -154,10 +169,15 @@ def request(root, arguments, document):
             headers.setdefault(name.lower(), []).append(content.strip())
     with (root / "object.lock").open("a+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        previous = head_path.read_bytes() if head_path.exists() else None
+        previous = target.read_bytes() if target.exists() else None
         etag = '"' + hashlib.sha256(previous).hexdigest() + '"' if previous is not None else None
         if method == "GET":
-            status, response = (200, previous) if previous is not None else (404, b"")
+            if previous is None:
+                status, response = 404, b""
+            elif headers.get("if-none-match") == [etag]:
+                status, response = 304, b""
+            else:
+                status, response = 200, previous
         elif method == "PUT":
             create = headers.get("if-none-match") == ["*"] and "if-match" not in headers
             replace = headers.get("if-match") == [etag] and "if-none-match" not in headers
@@ -169,26 +189,37 @@ def request(root, arguments, document):
                 status = 412
             else:
                 body = upload_body(options)
-                head = json.loads(body)
-                if set(head) != {"version", "hub", "revision", "snapshot"} or head["version"] != 2:
-                    raise ValueError("invalid head object")
-                if not isinstance(head["revision"], int) or isinstance(head["revision"], bool) or head["revision"] <= 0:
-                    raise ValueError("invalid revision")
-                if not isinstance(head["hub"], str) or not re.fullmatch("[0-9a-f]{64}", head["snapshot"]):
-                    raise ValueError("invalid identity")
-                descriptor, temporary = tempfile.mkstemp(dir=head_path.parent)
+                if head:
+                    value = json.loads(body)
+                    if set(value) != {"version", "hub", "revision", "snapshot"} or value["version"] != 2:
+                        raise ValueError("invalid head object")
+                    if not isinstance(value["revision"], int) or isinstance(value["revision"], bool) or value["revision"] <= 0:
+                        raise ValueError("invalid revision")
+                    if not isinstance(value["hub"], str) or not re.fullmatch("[0-9a-f]{64}", value["snapshot"]):
+                        raise ValueError("invalid identity")
+                elif len(body) > 1 << 20:
+                    raise ValueError("oversized live object")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                descriptor, temporary = tempfile.mkstemp(dir=target.parent)
                 with os.fdopen(descriptor, "wb") as stream:
                     stream.write(body)
-                os.replace(temporary, head_path)
+                os.replace(temporary, target)
                 status = 200
             response, etag = b"", None
+        elif method == "DELETE" and not head:
+            if previous is None:
+                status = 404
+            else:
+                target.unlink()
+                status = 204
+            response, etag = b"", None
         else:
-            raise ValueError("only GET and conditional PUT are supported")
+            raise ValueError("only GET, conditional PUT, and live DELETE are supported")
         with (root / "requests.jsonl").open("a") as log:
             # Log only the nonsecret object-store contract, never signing data.
             conditions = {name: values for name, values in headers.items()
                           if name in ("if-match", "if-none-match")}
-            log.write(json.dumps({"method": method, "status": status, "conditions": conditions}) + "\n")
+            log.write(json.dumps({"method": method, "url": url, "status": status, "conditions": conditions}) + "\n")
     response_headers = f"HTTP/1.1 {status} Fixture\r\nContent-Length: {len(response)}\r\n"
     if etag is not None:
         response_headers += f"ETag: {etag}\r\n"

@@ -38,6 +38,14 @@ pub struct Entry {
     pub password_ref: Option<String>,
     pub password_env: String,
     pub shared: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub machines: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    Primary,
+    Secondary,
 }
 
 impl Entry {
@@ -59,6 +67,7 @@ impl Entry {
                 .clone()
                 .expect("runtime configuration"),
             shared: config.sharing.bot_data,
+            machines: Vec::new(),
         }
     }
 
@@ -185,6 +194,16 @@ impl Registry {
                 ));
             }
             config.validate_url(&entry.repository)?;
+            let mut machines = HashSet::new();
+            if !entry.machines.iter().all(|machine| {
+                machine.len() == 64
+                    && machine
+                        .bytes()
+                        .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+                    && machines.insert(machine)
+            }) {
+                return Err(Error::new("Invalid registry machine list"));
+            }
         }
         Ok(())
     }
@@ -241,6 +260,21 @@ impl Registry {
             ));
         }
         Ok(())
+    }
+
+    // Raw Bot fields, not `id()`: `status` may ask before configuration is complete.
+    pub fn role(&self, config: &Config) -> Option<Role> {
+        let entry = self.entry(config.bot.id.as_deref()?).ok()?;
+        if config.bot.runtime_id.as_deref() == Some(entry.runtime_id.as_str()) {
+            Some(Role::Primary)
+        } else if config
+            .machine_hash()
+            .is_some_and(|hash| entry.machines.contains(&hash))
+        {
+            Some(Role::Secondary)
+        } else {
+            None
+        }
     }
 
     pub fn credentials(&self, config: &Config) -> Result<()> {
@@ -342,3 +376,7 @@ impl Registry {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "registry_tests.rs"]
+mod tests;

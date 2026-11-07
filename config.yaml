@@ -10,6 +10,7 @@ bot:
   role: null # AI policy.
 machine:
   id: null # Host policy: reuse an existing machine ID; leave unset if unavailable.
+  # The registry stores only its per-hub hash (status.machine).
   root: null # Host policy: reuse the existing shared management location.
 storage:
   provider: r2 # CLI: r2 or local.

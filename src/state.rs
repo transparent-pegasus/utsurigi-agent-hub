@@ -184,6 +184,20 @@ impl Lock {
         Self::acquire_with_timeout(root, false, "Bot state exclusive", Duration::ZERO)
     }
 
+    /// `None` when another local operation holds the Bot state lock.
+    pub fn try_acquire(root: &Path) -> Result<Option<Self>> {
+        let kind = "Bot state exclusive";
+        let (file, path) = Self::open(root, kind)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(error)) => Err(Error::new(format!(
+                "Cannot acquire {kind} lock at {}: {error}",
+                path.display()
+            ))),
+        }
+    }
+
     pub fn cache_shared(root: &Path) -> Result<Self> {
         Self::acquire_with_timeout(root, true, "shared cache shared", Duration::from_secs(30))
     }
@@ -197,12 +211,7 @@ impl Lock {
         )
     }
 
-    fn acquire_with_timeout(
-        root: &Path,
-        shared: bool,
-        kind: &str,
-        timeout: Duration,
-    ) -> Result<Self> {
+    fn open(root: &Path, kind: &str) -> Result<(File, PathBuf)> {
         let path = root.join("operation.lock");
         private_dir(root).map_err(|error| {
             Error::new(format!(
@@ -237,6 +246,16 @@ impl Lock {
                 error.message
             ))
         })?;
+        Ok((file, path))
+    }
+
+    fn acquire_with_timeout(
+        root: &Path,
+        shared: bool,
+        kind: &str,
+        timeout: Duration,
+    ) -> Result<Self> {
+        let (file, path) = Self::open(root, kind)?;
         let started = Instant::now();
         loop {
             let result = if shared {

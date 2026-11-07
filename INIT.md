@@ -1,6 +1,6 @@
 ---
 description: Setup, hub membership, storage, and optional capabilities.
-when: No Bot YAML, status.ready=false, or setup/add/join Bot or hub requested.
+when: No Bot YAML, status.ready=false, or setup/add/join Bot, machine, or hub requested.
 ---
 # Initialize
 
@@ -44,7 +44,8 @@ and inspect it before adoption. Reuse its repository and password reference as w
 relocation is a separate recovery operation. Continuation hands over or updates
 that identity: stop its previous runtime before activating the replacement.
 An independently running clone is a separate operation whose identity and data
-scope must be agreed explicitly. For new Bots, allocate a new ID,
+scope must be agreed explicitly. To run the same Bot in parallel, add a
+[secondary runtime](#secondary-runtimes-and-live-sync). For new Bots, allocate a new ID,
 repository destination, and password reference in the chosen Hub without replacing
 local data or reusing retired identifiers. Generate its password only after the
 empty-destination check below. Group related questions into 1–2 exchanges.
@@ -169,8 +170,8 @@ Let the initializing Bot investigate machine identity, file sharing, and existin
 resources. Reuse the first compatible installation within the same ownership and
 access scope. Read an available machine identifier; never generate one. Record
 `machine.id` as a quoted string and `machine.root` in each Bot's private YAML;
-leave unavailable IDs null. Keep machine metadata out of shared knowledge and
-synchronized content.
+leave unavailable IDs null. Keep raw machine IDs out of shared knowledge and
+synchronized content; the registry `machines` list holds only `status.machine` hashes.
 
 Keep one managed copy of shared memory and common knowledge per hub outside Bot
 workspaces. Reuse existing native resources in place within that hub's authorized data scope
@@ -187,6 +188,23 @@ choose an authorized common folder or native knowledge facility. No Bot-specific
 layout is required. Use distinct roots for different hubs or machines.
 Read [OPS](OPS.md#publish-and-consume) before consuming shared files; it defines
 cache layout, atomic switching, reader locks, and retention.
+
+### Secondary runtimes and live sync
+
+To run one Bot on several machines or services at once, copy the primary's private
+YAML, replace `machine.*`, `paths.*`, and `bot.platform`, and generate a new
+`bot.runtime_id` once for that machine. Prepare restic as below. After every Bot in
+the hub uses a CLI that knows `machines`, add the secondary's `status.machine` to
+the Bot's registry `machines` with `registry publish`. Secondaries never run
+`setup`, `sync`, or `prune`; they read other Bot data with `pull`.
+
+At setup and after file-layout changes, choose the real-time files (tasks and
+rules) and run `live define --task DIR/ --rule FILE` with paths inside
+`data.include`. Prefer one task per file and a task directory to receive requests.
+Schedule `live check` every minute with native scheduling. If the platform cannot
+wake every minute (for example server cron with a sleeping sandbox) and the user
+needs requests from Bots on other services, suggest a receive-only Bot that runs
+`live check` every minute. See [OPS](OPS.md#live-sync).
 
 ### Paths and storage
 
