@@ -13,6 +13,9 @@ Propose additions, changes, or removals for user approval.
   choices, including `true`, and never turn off native systems with this rule.
 - Prefer native Bot scheduling for periodic tasks, including reviews and sync.
   Set review timing there. Reuse its server cron wake mechanism when the local host sleeps.
+- Shared task records are required for every Bot; migrate native task state under
+  TASKS.md. The optional-default rule does not apply to tasks. Preserve native
+  scheduling implementations and guard actions with accepted shared task state.
 - Use Rust unless specified otherwise.
 - Use capable host connectors first; otherwise use authorized computer automation. Keep secret delivery secure.
 - Keep prose brief. Install Caveman only when enabled.

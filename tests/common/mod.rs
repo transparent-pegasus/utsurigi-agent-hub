@@ -163,6 +163,14 @@ impl Fixture {
             }),
         };
         bot.save();
+        let output = Command::new(env!("CARGO_BIN_EXE_utsurigi-agent-hub"))
+            .env_clear()
+            .arg("--config")
+            .arg(&bot.file)
+            .args(["tasks", "init"])
+            .output()
+            .unwrap();
+        success(&output);
         bot
     }
 

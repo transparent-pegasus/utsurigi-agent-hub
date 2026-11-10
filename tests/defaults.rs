@@ -12,6 +12,10 @@ fn public_defaults_match_the_exact_onboarding_schedule_and_feature_contract() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let document = fs::read_to_string(root.join("config.yaml")).unwrap();
     let defaults: Value = serde_saphyr::from_str(&document).unwrap();
+    assert!(
+        defaults.get("tasks").is_none(),
+        "mandatory tasks have no enable toggle"
+    );
     for (keys, expected) in [
         (vec!["version"], json!(1)),
         (vec!["hub"], json!("default")),
@@ -35,7 +39,6 @@ fn public_defaults_match_the_exact_onboarding_schedule_and_feature_contract() {
         (vec!["budget", "free_tier_only"], json!(true)),
         (vec!["budget", "max_bots"], json!(50)),
         (vec!["budget", "storage_target_gb"], json!(5)),
-        (vec!["tasks", "enabled"], json!(true)),
         (vec!["memory", "enabled"], json!(false)),
         (vec!["memory", "embedding_model"], Value::Null),
         (vec!["memory", "retrieval_bot_id"], Value::Null),

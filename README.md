@@ -21,14 +21,19 @@ Read BOT.md first, then INIT.md; follow their references to other Markdown guide
 - Named hubs: choose each Bot's hub during setup.
 - Periodic review: prefer native Bot features when equivalent or better.
 - Setup through dialogue.
+- Required [shared tasks](TASKS.md): dependencies, user waits, goals, logs, and archived history across Bots.
 - [YAML configuration](config.yaml).
 
 ## Optional features
 
-Task management, [Memory RAG](optional/README.md), Caveman. Template defaults are
-tasks and Caveman on, RAG off. During setup, override an optional feature's default
+[Memory RAG](optional/README.md), Caveman. Template defaults are
+Caveman on, RAG off. During setup, override an optional feature's default
 to `false` when the Bot already covers it and the optional feature supplies no
 capability missing from the Bot. An explicit user decision of `true` wins.
+
+Task management is mandatory for new and existing Bots. Migrate GrokBot/Muse
+records through [TASKS](TASKS.md); native schedules remain with their Bot.
+Legacy `tasks.enabled` values are accepted for compatibility and do not disable tasks.
 
 ## Credentials and recovery
 

@@ -5,6 +5,7 @@ when: >-
   OPS.md: sync/backup/share/include/exclude/schedule/cleanup.
   RECOVERY.md: nonzero exit/restore/move/handover/retire/rotate,
   locks/wrong passwords/interrupted setup.
+  TASKS.md: task/goal migration, task updates, dependencies, waits, or scheduling guards.
 ---
 # Agent contract
 
@@ -17,6 +18,13 @@ Use `utsurigi-agent-hub --config <bot YAML> <command>`. Read `status` JSON first
 consume only verified `status.active_shared`. Only the current runtime publishes
 its Bot data. `registry publish` requires shared credentials and a current authoring base.
 For long shared reads, follow the [reader lock protocol](OPS.md#publish-and-consume).
+
+Task management is required for new and existing Bots; follow [TASKS](TASKS.md).
+For normal progress reads use `tasks list --accepted`: only `in_progress` records.
+Select pending, service waits, user waits, and archived history explicitly when needed.
+Write work logs after Note as `TIMESTAMP | BOT_NAME | CONTENT`. Keep native
+schedulers, check accepted task state before their actions, and preserve native
+task records until migration and shared publication are verified.
 
 Read [INIT](INIT.md), [OPS](OPS.md), or [RECOVERY](RECOVERY.md) under the conditions
 above. Load [principles](knowledge/principles.md) always; load [practices](knowledge/practices.md) only for feature/policy decisions or reviews.

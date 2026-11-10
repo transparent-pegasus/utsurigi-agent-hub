@@ -433,6 +433,11 @@ pub fn export(config: &Config, shared: bool) -> Result<Export> {
     };
     let root = root.as_ref().expect("runtime configuration");
     let state = config.paths.state.as_ref().expect("runtime configuration");
+    let _tasks_lock = if shared {
+        crate::tasks::authoring_lock(root)?
+    } else {
+        None
+    };
     no_symlinks(root)?;
     if !root.is_dir() {
         return Err(Error::new(format!(
@@ -478,6 +483,8 @@ pub fn export(config: &Config, shared: bool) -> Result<Export> {
     preserve_directories(root, export.tree.path(), Path::new("."))?;
     if !shared {
         retain_owned(config, export.tree.path())?;
+    } else {
+        crate::tasks::load_shared(export.tree.path())?;
     }
     Ok(export)
 }
