@@ -54,7 +54,9 @@ pub struct Config {
     pub sharing: Sharing,
     pub sync: Sync,
     pub budget: Budget,
-    pub tasks: Tasks,
+    // Parse old toggles for compatibility; task management is now required.
+    #[serde(rename = "tasks")]
+    pub _legacy_tasks: LegacyTasks,
     pub memory: Memory,
     pub skills: Skills,
     pub review: Review,
@@ -229,12 +231,13 @@ impl Default for Budget {
 
 #[derive(Deserialize, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
-pub struct Tasks {
-    pub enabled: bool,
+pub struct LegacyTasks {
+    #[serde(rename = "enabled")]
+    pub _enabled: bool,
 }
-impl Default for Tasks {
+impl Default for LegacyTasks {
     fn default() -> Self {
-        Self { enabled: true }
+        Self { _enabled: true }
     }
 }
 

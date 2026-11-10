@@ -2251,6 +2251,7 @@ fn registry_privacy_stage_registry(fixture: &Fixture, tool: &Path, registry: &Pa
         shared.to_string(),
     );
     seed.save();
+    fixture.ok(&seed, &["tasks", "init"]);
     fixture.ok(&seed, &["setup"]);
     let source = fixture.active_shared(&seed);
     copy_tree(&source, &tool.join("published-source"));

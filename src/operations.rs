@@ -75,6 +75,7 @@ struct Prepared {
 struct ImportedData {
     registry: Registry,
     history: History,
+    tasks: Option<crate::tasks::Collection>,
 }
 
 struct Imported {
@@ -117,6 +118,7 @@ pub fn execute(path: &Path, action: Action) -> Result<()> {
             return Ok(());
         }
         Action::Status => return status(&config),
+        Action::Tasks { command } => return crate::tasks::execute(&config, command),
         Action::Live { command } => return live_action(&config, command),
         _ => (),
     }
@@ -200,7 +202,10 @@ pub fn execute(path: &Path, action: Action) -> Result<()> {
                 recover(&config, &restic, repository, &snapshot, &destination)
             }
             Action::Prune => prune(&config, &restic),
-            Action::Validate { .. } | Action::Status | Action::Live { .. } => unreachable!(),
+            Action::Validate { .. }
+            | Action::Status
+            | Action::Tasks { .. }
+            | Action::Live { .. } => unreachable!(),
         }
     })();
     if let Err(error) = result {
@@ -418,12 +423,17 @@ fn import_shared(config: &Config, restic: &Restic<'_>) -> Result<Imported> {
             let registry = Registry::load(path, config)?;
             let history = History::load(path, &registry)?;
             Decisions::load(path, config)?;
+            let tasks = crate::tasks::load_shared(path)?;
             if Revision::load(path, config)?.revision != observed.head.revision {
                 return Err(Error::new(
                     "Shared snapshot revision does not match its accepted head",
                 ));
             }
-            Ok(ImportedData { registry, history })
+            Ok(ImportedData {
+                registry,
+                history,
+                tasks,
+            })
         },
     )?;
     Ok(Imported {
@@ -536,6 +546,11 @@ fn prepare_initial(
         }
     };
     Decisions::load(data.export.tree.path(), config)?;
+    if source.is_some() {
+        crate::tasks::ensure_export(&mut data.export)?;
+    }
+    let tasks = crate::tasks::require_shared(data.export.tree.path())?;
+    crate::tasks::check_transition(None, Some(&tasks))?;
     data.registry.register(config)?;
     data.registry.credentials(config)?;
     data.history.observe(&data.registry, config, restic, true)?;
@@ -732,6 +747,7 @@ fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> 
     for _ in 0..CAS_ATTEMPTS {
         let mut imported = import_shared(config, restic)?;
         let mut data = imported.prepare(config, restic)?;
+        let tasks_changed = crate::tasks::ensure_export(&mut data.export)?;
         let changed = data.registry.register(config)?;
         data.registry.credentials(config)?;
         data.history.check(&data.registry, restic)?;
@@ -746,7 +762,7 @@ fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> 
             .revision
             .checked_add(1)
             .ok_or_else(|| Error::new("Shared revision overflow"))?;
-        if changed || previous_history != data.history {
+        if changed || tasks_changed || previous_history != data.history {
             rewrite_metadata(config, &mut data, revision)?;
             shared_budget(config, data.export.bytes)?;
         }
@@ -756,7 +772,7 @@ fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> 
         private_repository(config, restic, &data.history)?;
         let history_changed = previous_history != data.history;
         let mut predecessors = Vec::new();
-        if changed || history_changed {
+        if changed || tasks_changed || history_changed {
             rewrite_metadata(config, &mut data, revision)?;
             shared_budget(config, data.export.bytes)?;
             if !commit_candidate(
@@ -843,6 +859,8 @@ fn publish(config: &Config, restic: &Restic<'_>, takeover: bool) -> Result<()> {
     }
     let candidate = Registry::load(export.tree.path(), config)?;
     Decisions::load(export.tree.path(), config)?;
+    let tasks = crate::tasks::require_shared(export.tree.path())?;
+    crate::tasks::check_transition(imported.data.tasks.as_ref(), Some(&tasks))?;
     if !takeover
         && candidate.bots.iter().any(|entry| {
             imported

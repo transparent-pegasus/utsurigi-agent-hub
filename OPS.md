@@ -61,6 +61,16 @@ Backups preserve file and directory permissions and modification times.
 
 ## Sync and schedule
 
+Task records live in the required [shared task store](TASKS.md). Read progress
+with `tasks list --accepted`, which follows only the `in_progress` INDEX entries;
+select queued tasks, waits or archived history explicitly. Task commands without
+`--accepted` edit/read the authoring tree. Before replacing that tree with a
+verified base, stop local task writers so its lock inode is not replaced in use.
+Publish task edits through `registry publish`; ordinary sync does not publish them.
+Native schedules check accepted task state/dependencies before each action.
+Parent cancellation archives unfinished descendants atomically; dependency-only
+tasks keep their status and remain blocked. See TASKS for logs and recovery journals.
+
 With `joined: true`, an initialized schedule without a current shared cache gives
 `next_action: sync`. `joined: false` or an uninitialized schedule requires `setup`.
 

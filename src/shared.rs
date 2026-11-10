@@ -27,7 +27,7 @@ pub struct SharedCache {
     observed: Option<Pointer>,
 }
 
-fn root(config: &Config) -> Option<PathBuf> {
+pub(crate) fn root(config: &Config) -> Option<PathBuf> {
     // The host supplies one machine-wide imports root; machine.root is metadata only.
     config
         .paths

@@ -70,11 +70,10 @@ budget:
   # Private JSON: expires_at, repositories, max_source_bytes.
   # Host verifies billing/quota and encryption overhead before issuing permission.
   attestation_file: null
-# The remaining sections are AI policies; the CLI does not install or run them.
+# Shared task management is required; see TASKS.md. Legacy tasks.enabled is ignored.
+# The remaining optional sections are AI policies; the CLI does not install or run them.
 # INIT sets duplicate optional defaults false if they add no missing capability.
 # Explicit user choices, including true, take precedence over these defaults.
-tasks:
-  enabled: true
 memory:
   enabled: false
   embedding_model: null

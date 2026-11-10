@@ -16,6 +16,8 @@ and shared knowledge. Unattended sync needs scheduling and secure secret injecti
 Before relocating/exporting Bot data or initializing its backup repositories,
 complete [secret and transfer preflight](#secrets-and-transfer-before-externalization).
 The inventory and private configuration steps below prepare that preflight.
+Prepare [required task migration](#required-task-migration) before the first
+setup, and finish its accepted-read checks before declaring onboarding complete.
 
 The host needs Unix, Rust, network access, writable storage, and trusted CA roots.
 Acquisition and storage children receive the proxy and CA variables listed in
@@ -82,10 +84,6 @@ ASK agreement; missing/null checks cannot replace this dialogue.
   backed-up data (default: `true`)?" If kept private, backup and access to the
   hub's common knowledge continue.
 
-- `tasks.enabled`, only for new adoption: "Should this framework also record
-  and track tasks (default: the value derived below)?" Preserve existing methods
-  and unfinished tasks; reuse approved operation without asking again.
-
 - `skills.caveman.enabled`, only at hub initialization: "Should this hub use
   Caveman to shorten responses (default: the value derived below)? Existing
   instructions take priority; proxy, gateway, and model-routing features are excluded." Record
@@ -127,8 +125,8 @@ has no capability missing from the Bot, replace its template default with
 `false`. If it fills a gap, keep the template candidate and discuss adoption
 under the existing policy. Never disable the native capability. A user decision
 of `true` from this or an earlier dialogue overrides the derived default; preserve
-an approved `false` as well. This rule covers tasks, RAG, and Caveman, not backup
-or Bot-data sharing. Hub-wide decisions already approved are reused by joining Bots.
+an approved `false` as well. This rule covers RAG and Caveman, not required task
+management, backup, or Bot-data sharing. Hub-wide decisions already approved are reused by joining Bots.
 For Caveman, distinguish an explicit hub-wide user decision from a template value:
 only the former overrides the Bot-specific default derived from its capabilities.
 Keep Bot-specific values in the Bot's YAML and their basis in hub knowledge.
@@ -489,12 +487,47 @@ Before declaring setup complete or enabling scheduling, record all of:
   success does not satisfy remote backup acceptance. Preserve originals and the
   prior verified remote generation until this succeeds.
 
+## Required task migration
+
+Shared [task management](TASKS.md) is mandatory for every new and continuing Bot.
+Do not ask whether to enable it or derive an opt-out from native capabilities.
+Legacy `tasks.enabled: false` is accepted only for configuration compatibility;
+it no longer disables tasks. This replaces the former optional/no-format policy
+for the shared task store. Preserve native data and native instructions while
+converting authorized task records into the common format.
+
+Inventory native checklists, tracking items, queued work, service/user waits,
+goals, subgoals, workdir/GOAL.md/activity records and schedule references. Compare
+with prior shared source IDs before importing. Keep native originals and exports;
+do not infer completion from disappearance or copy scheduler bodies or secrets.
+The existing source-scope and secret/transfer preflight still apply before publication.
+
+For a new hub, run `tasks init` and import the authorized native export before
+the first `setup`; setup requires a valid task store. An unmarked existing
+`tasks/` directory is preserved and requires explicit migration, never overwrite.
+If it contains native files, keep them at an agreed source location while
+preparing the canonical store, then import their explicit export.
+
+For a joining or continuing Bot, setup registers against the accepted shared
+tree. Older accepted hubs without a task directory receive the empty required
+schema during setup/migration; existing content is retained. Then obtain the
+verified current authoring base, quiesce task writers, retain its revision,
+omit generated history, and import this Bot's native records without replacing
+other Bots' tasks. Publish the result using the normal CAS protocol.
+
+Onboarding is complete only after comparing source IDs, states, relationships,
+goal/log contents and schedule refs, successful shared publication, and an
+accepted task read. Check archived tasks explicitly for migration verification;
+normal progress reads use only `tasks list --accepted` and `in_progress` records.
+When another Bot joins, verify it sees the same accepted tasks. Keep native
+schedulers and add task-state guards; retire duplicate task display/tracking
+only after comparison succeeds. Record migration completion in an attributed Log.
+
 ## Optional capabilities
 
-Choose memory and task systems under the shared [review policy](knowledge/practices.md).
-Honor the user's selection. Keep unfinished tasks. Do not impose a task format.
-Disabling framework tasks or RAG (`memory.enabled`) never disables native or
-existing systems.
+Choose memory under the shared [review policy](knowledge/practices.md).
+Honor the user's selection. Disabling framework RAG (`memory.enabled`) never
+disables native or existing systems.
 
 Only when framework RAG is enabled and needed, research current public text
 retrieval models for the user's language, retrieval quality, memory/CPU budget,

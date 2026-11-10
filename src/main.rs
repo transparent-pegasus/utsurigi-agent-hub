@@ -17,6 +17,7 @@ mod schedule_retention_tests;
 mod selection;
 mod shared;
 mod state;
+mod tasks;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -64,6 +65,10 @@ enum Action {
     Registry {
         #[command(subcommand)]
         command: RegistryAction,
+    },
+    Tasks {
+        #[command(subcommand)]
+        command: tasks::TaskAction,
     },
     Prune,
     Status,
