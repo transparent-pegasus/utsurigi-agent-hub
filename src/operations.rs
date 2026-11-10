@@ -3,12 +3,15 @@ use crate::decisions::{self, Decisions};
 use crate::error::{Error, IoContext, Result};
 use crate::head::{Head, HeadStore, ObservedHead};
 use crate::history::History;
-use crate::registry::{LegacyRegistry, Registry};
+use crate::live::format::HubMark;
+use crate::live::policy::Policy;
+use crate::live::state::Live;
+use crate::registry::{LegacyRegistry, Registry, Role};
 use crate::restic::{BackupGuard, Restic, Snapshot, latest, password};
 use crate::selection::{self, Export};
 use crate::shared::{self, SharedCache};
 use crate::state::{self, Failure, Lock, State, fresh_destination, private_dir, private_file};
-use crate::{Action, RegistryAction, RepositoryKind, budget, migration};
+use crate::{Action, LiveAction, RegistryAction, RepositoryKind, budget, live, migration};
 use crate::{retention, schedule};
 use chrono::{DateTime, Datelike, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -116,6 +119,7 @@ pub fn execute(path: &Path, action: Action) -> Result<()> {
         }
         Action::Status => return status(&config),
         Action::Tasks { command } => return crate::tasks::execute(&config, command),
+        Action::Live { command } => return live_action(&config, command),
         _ => (),
     }
     let operation = match &action {
@@ -130,7 +134,17 @@ pub fn execute(path: &Path, action: Action) -> Result<()> {
     let Some(root) = config.paths.state.as_ref() else {
         return config.runtime();
     };
-    let _lock = Lock::acquire(root)?;
+    let _lock = if matches!(action, Action::Sync { scheduled: true }) {
+        // Hosts suspend retries after a nonzero exit; a busy Bot (e.g. a live check) is not a
+        // failure, so the next scheduled call retries.
+        let Some(lock) = Lock::try_acquire(root)? else {
+            println!("{}", serde_json::json!({"skipped": true, "reason": "busy"}));
+            return Ok(());
+        };
+        lock
+    } else {
+        Lock::acquire(root)?
+    };
     let mut state = State::load(root, &config.hub)?;
     // A skipped scheduled operation must leave every unresolved failure intact.
     if matches!(action, Action::Sync { scheduled: true })
@@ -188,7 +202,10 @@ pub fn execute(path: &Path, action: Action) -> Result<()> {
                 recover(&config, &restic, repository, &snapshot, &destination)
             }
             Action::Prune => prune(&config, &restic),
-            Action::Validate { .. } | Action::Status | Action::Tasks { .. } => unreachable!(),
+            Action::Validate { .. }
+            | Action::Status
+            | Action::Tasks { .. }
+            | Action::Live { .. } => unreachable!(),
         }
     })();
     if let Err(error) = result {
@@ -209,7 +226,31 @@ pub fn execute(path: &Path, action: Action) -> Result<()> {
     Ok(())
 }
 
-fn status_time(seconds: Option<i64>) -> Result<Option<String>> {
+fn live_action(config: &Config, command: LiveAction) -> Result<()> {
+    match command {
+        LiveAction::Check => live::sync::check(config),
+        LiveAction::Define {
+            tasks,
+            rules,
+            base_seconds,
+            idle_after_seconds,
+            task_idle_seconds,
+            rule_idle_seconds,
+        } => {
+            let default = Policy::default();
+            let policy = Policy {
+                base_seconds: base_seconds.unwrap_or(default.base_seconds),
+                idle_after_seconds: idle_after_seconds.unwrap_or(default.idle_after_seconds),
+                task_idle_seconds: task_idle_seconds.unwrap_or(default.task_idle_seconds),
+                rule_idle_seconds: rule_idle_seconds.unwrap_or(default.rule_idle_seconds),
+            };
+            live::sync::define(config, &tasks, &rules, policy)
+        }
+        LiveAction::Request { bot_id, file } => live::sync::request(config, &bot_id, &file),
+    }
+}
+
+pub(crate) fn status_time(seconds: Option<i64>) -> Result<Option<String>> {
     seconds
         .map(|seconds| {
             let time = DateTime::from_timestamp(seconds, 0)
@@ -228,6 +269,20 @@ fn status(config: &Config) -> Result<()> {
     };
     let missing = config.missing();
     let active_shared = shared::active(config)?;
+    let role = active_shared
+        .as_ref()
+        .and_then(|path| Registry::load(path, config).ok())
+        .and_then(|registry| registry.role(config));
+    let live = match &config.paths.state {
+        Some(root) => Live::load(root)?,
+        None => None,
+    };
+    let live = match live {
+        Some(live) => serde_json::json!({
+            "next_check": status_time(Some(live.next_check))?, "failure": live.failure,
+        }),
+        None => serde_json::Value::Null,
+    };
     let failure = state.failures.get("setup").or_else(|| {
         state
             .failures
@@ -257,6 +312,14 @@ fn status(config: &Config) -> Result<()> {
             failure.operation.as_str(),
             vec![failure.reason.clone(), failure.next_action.clone()],
         )
+    } else if role == Some(Role::Secondary) {
+        (
+            "live",
+            vec![
+                "Secondary runtime: run live check; the primary runtime backs up Bot data"
+                    .to_owned(),
+            ],
+        )
     } else if !state.joined || state.anchor.is_none() || state.next_due.is_none() {
         (
             "setup",
@@ -284,9 +347,43 @@ fn status(config: &Config) -> Result<()> {
             "last_success": status_time(state.last_success)?, "anchor": status_time(state.anchor)?,
             "next_due": status_time(state.next_due)?, "active_shared": active_shared,
             "failure": failure, "next_action": next_action, "remediation": remediation,
+            "machine": config.machine_hash(), "live": live,
+            "role": role.map(|role| match role {
+                Role::Primary => "primary",
+                Role::Secondary => "secondary",
+            }),
         })
     );
     Ok(())
+}
+
+/// The hub head this machine last imported: its revision and snapshot.
+pub(crate) fn hub_mark(config: &Config) -> Result<Option<HubMark>> {
+    let Some(path) = shared::active(config)? else {
+        return Ok(None);
+    };
+    let snapshot = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("shared version directory")
+        .to_owned();
+    Ok(Some(HubMark {
+        revision: Revision::load(&path, config)?.revision,
+        snapshot,
+    }))
+}
+
+/// Imports the accepted shared head into the shared cache and makes it current.
+pub(crate) fn import_hub(config: &Config) -> Result<()> {
+    private_dir(
+        config
+            .paths
+            .imports
+            .as_ref()
+            .expect("runtime configuration"),
+    )?;
+    let restic = Restic::open(config, false)?;
+    import_shared(config, &restic)?.publish()
 }
 
 fn import_shared(config: &Config, restic: &Restic<'_>) -> Result<Imported> {
@@ -518,15 +615,25 @@ fn commit_candidate(
         "shared-v2",
         guard,
     )?;
-    store.compare_exchange(
-        expected,
-        &Head {
-            version: 2,
-            hub: config.hub.clone(),
-            revision,
-            snapshot,
-        },
-    )
+    let head = Head {
+        version: 2,
+        hub: config.hub.clone(),
+        revision,
+        snapshot,
+    };
+    let committed = store.compare_exchange(expected, &head)?;
+    if committed {
+        // Best effort: the head is already accepted, and a check whose cache holds it repairs a
+        // stale index.
+        let _ = live::sync::raise_hub(
+            config,
+            &HubMark {
+                revision,
+                snapshot: head.snapshot,
+            },
+        );
+    }
+    Ok(committed)
 }
 
 fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> {

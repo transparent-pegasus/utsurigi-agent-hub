@@ -41,10 +41,11 @@ calls to demonstrate that injection worked.
 ## Match the method to this CLI
 
 Configure `repositories.shared.password_env`, `repositories.bot.password_env`, and
-any authorized peer's registry `password_env` to the variable names the launcher
-will supply. Names are configurable; `HUB_SHARED_PASSWORD` and `HUB_BOT_PASSWORD`
-are examples, not built-ins. `password_ref` and `storage.credentials_ref` record
-recoverable references only. The CLI does not fetch them.
+any authorized peer's registry `password_env` (for `pull` and `live request`) to
+the variable names the launcher will supply. Names are configurable;
+`HUB_SHARED_PASSWORD` and `HUB_BOT_PASSWORD` are examples, not built-ins.
+`password_ref` and `storage.credentials_ref` record recoverable references only.
+The CLI does not fetch them.
 Forwarded connection/system names and the three AWS credential names in
 [.env.example](.env.example) are reserved for their documented purpose and cannot
 be active password names, regardless of the selected storage provider. Use

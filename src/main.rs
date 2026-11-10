@@ -4,7 +4,9 @@ mod decisions;
 mod error;
 mod head;
 mod history;
+mod live;
 mod migration;
+mod objects;
 mod operations;
 mod registry;
 mod restic;
@@ -70,6 +72,10 @@ enum Action {
     },
     Prune,
     Status,
+    Live {
+        #[command(subcommand)]
+        command: LiveAction,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -82,6 +88,29 @@ enum RegistryAction {
     Publish {
         #[arg(long)]
         takeover: bool,
+    },
+}
+#[derive(Subcommand)]
+enum LiveAction {
+    Check,
+    Define {
+        #[arg(long = "task")]
+        tasks: Vec<String>,
+        #[arg(long = "rule")]
+        rules: Vec<String>,
+        #[arg(long)]
+        base_seconds: Option<u64>,
+        #[arg(long)]
+        idle_after_seconds: Option<u64>,
+        #[arg(long)]
+        task_idle_seconds: Option<u64>,
+        #[arg(long)]
+        rule_idle_seconds: Option<u64>,
+    },
+    Request {
+        bot_id: String,
+        #[arg(long)]
+        file: PathBuf,
     },
 }
 

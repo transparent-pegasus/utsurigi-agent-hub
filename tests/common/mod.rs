@@ -244,8 +244,18 @@ impl Fixture {
     }
 
     pub fn fake_r2_head(&self, bot: &Bot, local_shared: &str) {
+        self.fake_r2(bot, &[("shared", local_shared)]);
+    }
+
+    // Serves the head and the uah-live/ keys of each named repository from its local directory.
+    pub fn fake_r2(&self, bot: &Bot, local: &[(&str, &str)]) {
         let directory = self.temp.path().join("head-curl");
-        let head = Path::new(local_shared).join("uah-head.json");
+        let shared = local
+            .iter()
+            .find(|(name, _)| *name == "shared")
+            .expect("the head lives in the shared repository")
+            .1;
+        let head = Path::new(shared).join("uah-head.json");
         assert!(head.starts_with(self.temp.path()));
         let executable = directory.join("bin/curl");
         write(
@@ -253,10 +263,23 @@ impl Fixture {
             include_str!("../fixtures/ownerless-compat-curl.py"),
         );
         fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
-        write(directory.join("fixture.json"), json!({
-            "url": format!("{}/uah-head.json", bot.repository("shared").strip_prefix("s3:").unwrap()),
-            "head_path": head,
-        }).to_string());
+        let base = |name: &str| bot.repository(name).strip_prefix("s3:").unwrap().to_owned();
+        let live: serde_json::Map<_, _> = local
+            .iter()
+            .map(|(name, path)| {
+                assert!(Path::new(path).starts_with(self.temp.path()));
+                (base(name), json!(path))
+            })
+            .collect();
+        write(
+            directory.join("fixture.json"),
+            json!({
+                "url": format!("{}/uah-head.json", base("shared")),
+                "head_path": head,
+                "live": live,
+            })
+            .to_string(),
+        );
     }
 
     pub fn cli_env(&self, bot: &Bot, args: &[&str], env: &[(&str, &str)]) -> Output {

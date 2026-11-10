@@ -391,7 +391,7 @@ const EXCLUDED_SUFFIXES: &[&str] = &[
     ".shm",
 ];
 
-fn excluded(path: &Path, extra: &GlobSet) -> bool {
+pub(crate) fn excluded(path: &Path, extra: &GlobSet) -> bool {
     if path.ancestors().any(|ancestor| extra.is_match(ancestor)) {
         return true;
     }
@@ -409,7 +409,7 @@ fn excluded(path: &Path, extra: &GlobSet) -> bool {
     })
 }
 
-fn exclusions(config: &Config) -> Result<GlobSet> {
+pub(crate) fn exclusions(config: &Config) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for pattern in &config.data.exclude {
         builder.add(Glob::new(pattern).map_err(|_| Error::new("Invalid exclusion pattern"))?);

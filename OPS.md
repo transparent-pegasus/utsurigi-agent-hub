@@ -1,6 +1,6 @@
 ---
 description: Synchronization, publication, data scope, scheduling, and local cleanup.
-when: Sync, backup, share, include/exclude, schedule, or cleanup requested.
+when: Sync, live, backup, share, include/exclude, schedule, or cleanup requested.
 ---
 # Operate
 
@@ -77,8 +77,10 @@ With `joined: true`, an initialized schedule without a current shared cache give
 Use `sync` for manual backup. Prefer native Bot scheduling to invoke
 `sync --scheduled` often enough to service `status.next_due`.
 The initial local-time anchor advances by fixed seconds, including across DST.
-A successful scheduled sync advances the due time; manual sync keeps it. On
-nonzero results, suspend automatic retries; inspect and reconcile before
+A successful scheduled sync advances the due time; manual sync keeps it.
+While another local operation (such as `live check`) holds the Bot state lock,
+`sync --scheduled` prints `{"skipped":true,"reason":"busy"}`; the next call retries.
+On nonzero results, suspend automatic retries; inspect and reconcile before
 resuming. A failed sync keeps its due time and does not authorize another write.
 Before sync/publication writes, the CLI saves `paths.state/pending-backup.yaml`.
 It clears this record only after remote verification, local publication, and any
@@ -99,6 +101,34 @@ and previous reader versions.
 
 Restic deduplicates data, but small SQLite changes may resend the entire database.
 No per-record incremental transfer or fixed latency is guaranteed.
+
+## Live sync
+
+`live check` syncs the files chosen with `live define` across the Bot's runtimes
+within minutes. Call it every minute; it prints `{"skipped":true}` until
+`status.live.next_check`. A check reads only the hub index
+(`uah-live/index.json` in the shared repository): one GET. Lists, objects, and hub
+snapshots are fetched only after the index moved. Hub rules still arrive through
+the verified shared import, so `status.active_shared` stays the authority.
+
+Each file is an encrypted object `uah-live/objects/<SHA-256>` in the Bot repository.
+`uah-live/list.json` holds encrypted names and ciphertext hashes and changes by
+compare-and-swap. Keys derive from the repository password; storage reveals no
+paths or contents. Files stay at most 1 MiB, 2,000 per Bot.
+
+Checks run every `base_seconds` (60) after a change. After `idle_after_seconds`
+(600) without one they slow to `task_idle_seconds` (300) when tasks are listed,
+else `rule_idle_seconds` (600), with ±10% jitter; set them with `live define`.
+Failures back off and retry; `status.live.failure` names the cause.
+
+Edits on two runtimes between checks keep both: the path takes the stored version,
+and the local edit becomes `NAME.conflict-HASH8.EXT` for the Bot to merge. Copies
+inside a task or rule directory sync like other files; a copy of a single-file
+root stays on the runtime that saw the conflict.
+`live request BOT_ID --file PATH` adds a new file to a shared Bot's first task
+directory and never edits existing files; it needs the target's password and write
+access. Cost: one R2 Class B read per check per Bot runtime, so 50 Bots on two
+machines stay inside the free tier even with every check at 60 seconds.
 
 ## Local cleanup and data scope
 

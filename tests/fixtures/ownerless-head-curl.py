@@ -1,11 +1,14 @@
 #!/usr/bin/python3
-"""Offline curl boundary for head tests; this program has no network path.
+"""Offline curl boundary for head and small-object tests; this program has no network path.
 
 Installed as <case>/bin/curl. All state is private, synthetic case data.
 Accept curl's config grammar rather than one serializer's whitespace/quotes.
+The head URL uses the single-head remote state. Any other key under PREFIX is
+an object in remote["objects"]: {key: {"etag": ..., "body_hex": ...}}.
 Run --self-test to check the parser and conditional object-store fixture.
 """
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -27,6 +30,12 @@ FLAGS = {
     "disable", "globoff", "no-progress-meter", "http1.1", "http2",
     "location", "compressed", "get", "no-buffer",
 }
+PREFIX = ("https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com"
+          "/ownerless-head-fixture/shared/prefix/")
+HEAD_NAME = "uah-head.json"
+# The product's RLIMIT_FSIZE also binds this child: keep large bodies out of
+# calls.jsonl and remote.json, recording their size and digest instead.
+INLINE_LIMIT = 4 * 1024
 
 
 def decode_value(text):
@@ -155,6 +164,33 @@ def upload_body(options, files):
     return b""
 
 
+def object_key(options):
+    """None selects the single-head state; anything else is an object key."""
+    url = one(options, "url")
+    if url is None or url.endswith("/" + HEAD_NAME):
+        return None
+    if not url.startswith(PREFIX):
+        raise ValueError("URL outside the fixture prefix")
+    return url[len(PREFIX):]
+
+
+def put_status(headers, etag):
+    """Conditional PUT outcome against the current ETag, or None when absent."""
+    if "if-match" in headers and "if-none-match" in headers:
+        return 400
+    if headers.get("if-none-match") == ["*"] and "if-match" not in headers:
+        return 412 if etag is not None else 200
+    if len(headers.get("if-match", [])) == 1 and "if-none-match" not in headers:
+        return 200 if etag is not None and headers["if-match"] == [etag] else 412
+    return 400  # An unconditional PUT is never accepted by this fixture.
+
+
+def stored_body(stored):
+    if "body_hex" not in stored:
+        raise ValueError("large uploaded bodies are recorded by digest only")
+    return bytes.fromhex(stored["body_hex"])
+
+
 def request(root, arguments, document):
     options = parse_request(arguments, document)
     scenario = json.loads((root / "fixture.json").read_text())
@@ -179,15 +215,52 @@ def request(root, arguments, document):
                 raise ValueError("invalid request header")
             headers.setdefault(name.lower(), []).append(content.strip())
 
+    inline = len(body) <= INLINE_LIMIT
+    object_name = object_key(options)
     call = {
-        "argv": arguments, "options": options, "method": method,
-        "headers": headers, "body": body.decode("utf-8", "replace"),
+        "argv": arguments, "options": options, "method": method, "key": object_name,
+        "headers": headers, "body": body.decode("utf-8", "replace") if inline else None,
+        "body_hex": body.hex() if inline else None, "body_size": len(body),
+        "body_sha256": hashlib.sha256(body).hexdigest(),
         "environment": dict(os.environ), "files": files,
     }
     overrides = scenario.get("get", {})
     if method == "GET" and remote.get("put_seen"):
         overrides = {**overrides, **scenario.get("after_put_get", {})}
-    if method == "GET":
+    if object_name is not None:
+        objects = remote.setdefault("objects", {})
+        stored = objects.get(object_name)
+        etag = stored["etag"] if stored else None
+        if method == "GET":
+            fresh = etag is not None and headers.get("if-none-match") == [etag]
+            status = overrides.get("status", 304 if fresh else 200 if stored else 404)
+            if "body" in overrides:
+                response = overrides["body"]
+            else:
+                response = "missing" if stored is None else b"" if fresh else stored_body(stored)
+            etags = overrides.get("etags", [etag] if stored else [])
+        elif method in ("PUT", "DELETE"):
+            overrides = scenario.get(method.lower(), {})
+            committed = overrides.get("commit_before_error", False)
+            if method == "PUT":
+                remote["put_seen"] = True
+                status = overrides.get("status", put_status(headers, etag))
+                if (200 <= status < 300) or committed:
+                    generation = remote.get("generation", 1) + 1
+                    remote["generation"] = generation
+                    objects[object_name] = {"etag": f'"new.etag/+==:{generation}"'}
+                    objects[object_name].update(
+                        {"body_hex": body.hex()} if inline
+                        else {"body_size": len(body), "body_sha256": call["body_sha256"]})
+            else:
+                status = overrides.get("status", 204 if stored else 404)
+                if stored and ((200 <= status < 300) or committed):
+                    del objects[object_name]
+            private_write(remote_path, json.dumps(remote).encode())
+            response, etags = overrides.get("body", ""), []
+        else:
+            raise ValueError("only GET, conditional PUT and DELETE are supported for objects")
+    elif method == "GET":
         status = overrides.get("status", 200 if remote["exists"] else 404)
         response = overrides.get("body", remote.get("raw_body"))
         if response is None:
@@ -196,15 +269,8 @@ def request(root, arguments, document):
     elif method == "PUT":
         overrides = scenario.get("put", {})
         remote["put_seen"] = True
-        if "if-match" in headers and "if-none-match" in headers:
-            status = 400
-        elif headers.get("if-none-match") == ["*"] and "if-match" not in headers:
-            status = 412 if remote["exists"] else 200
-        elif len(headers.get("if-match", [])) == 1 and "if-none-match" not in headers:
-            status = 200 if remote["exists"] and headers["if-match"] == [remote["etag"]] else 412
-        else:
-            status = 400  # An unconditional PUT is never accepted by this fixture.
-        status = overrides.get("status", status)
+        status = overrides.get(
+            "status", put_status(headers, remote["etag"] if remote["exists"] else None))
         if (200 <= status < 300) or overrides.get("commit_before_error", False):
             generation = remote.get("generation", 1) + 1
             remote.update(exists=True, head=json.loads(body), generation=generation,
@@ -215,11 +281,12 @@ def request(root, arguments, document):
         private_write(remote_path, json.dumps(remote).encode())
         response, etags = overrides.get("body", ""), []
     else:
-        raise ValueError("only GET and conditional PUT are supported")
+        raise ValueError("only GET and conditional PUT are supported for the head")
 
     if "body_bytes" in overrides:
         response = "x" * overrides["body_bytes"]
-    response = response.encode()
+    if isinstance(response, str):
+        response = response.encode()
     header_bytes = overrides.get("raw_headers")
     if header_bytes is None:
         header_bytes = f"HTTP/1.1 {status} Fixture\r\nContent-Length: {len(response)}\r\n"
@@ -356,6 +423,50 @@ def self_test():
                 self.assertEqual(send("PUT", 'If-Match: "stale"', 3), 412)
                 self.assertEqual(send("PUT", None, 4), 400)
                 self.assertEqual(json.loads((root / "remote.json").read_text())["head"], {"revision": 2})
+
+        def test_object_keys_conditional_get_put_and_delete(self):
+            with tempfile.TemporaryDirectory(prefix="ownerless-object-fixture-check-") as directory:
+                root = Path(directory)
+                private_write(root / "fixture.json", b"{}")
+                private_write(root / "remote.json", b'{"exists":false,"etag":"\\"absent\\"","objects":{}}')
+                payload = bytes(range(256))
+                private_write(root / "upload", payload)
+                def send(method, name, condition=None, upload="upload"):
+                    options = [f'request = "{method}"', "url = " + json.dumps(PREFIX + name),
+                               f'output = "{root / "body"}"', f'dump-header = "{root / "headers"}"',
+                               'write-out = "%{http_code}"']
+                    if condition:
+                        options.append("header = " + json.dumps(condition))
+                    if method == "PUT":
+                        options.append("data-binary = " + json.dumps("@" + str(root / upload)))
+                    with patch("sys.stdout", io.TextIOWrapper(io.BytesIO())), patch("sys.stderr", io.TextIOWrapper(io.BytesIO())):
+                        self.assertEqual(request(root, ["-q", "--config", "-"], "\n".join(options)), 0)
+                    return json.loads((root / "calls.jsonl").read_text().splitlines()[-1])
+                self.assertEqual(send("GET", "uah-live/a")["status"], 404)
+                created = send("PUT", "uah-live/a", "If-None-Match: *")
+                self.assertEqual((created["status"], created["key"], created["body_hex"]), (200, "uah-live/a", payload.hex()))
+                self.assertEqual(send("PUT", "uah-live/a", "If-None-Match: *")["status"], 412)
+                self.assertEqual(send("GET", "uah-live/a", 'If-None-Match: "new.etag/+==:2"')["status"], 304)
+                self.assertEqual((root / "body").read_bytes(), b"")
+                self.assertEqual(send("GET", "uah-live/a", 'If-None-Match: "stale"')["status"], 200)
+                self.assertEqual((root / "body").read_bytes(), payload)
+                self.assertIn(b'ETag: "new.etag/+==:2"', (root / "headers").read_bytes())
+                self.assertEqual(send("PUT", "uah-live/a", 'If-Match: "stale"')["status"], 412)
+                self.assertEqual(send("PUT", "uah-live/a")["status"], 400)
+                self.assertEqual(send("GET", HEAD_NAME)["status"], 404)  # The head keeps its own state.
+                large = b"z" * (INLINE_LIMIT + 1)
+                private_write(root / "large", large)
+                recorded = send("PUT", "uah-live/large", "If-None-Match: *", "large")
+                self.assertEqual((recorded["status"], recorded["body"], recorded["body_hex"]), (200, None, None))
+                self.assertEqual((recorded["body_size"], recorded["body_sha256"]), (len(large), hashlib.sha256(large).hexdigest()))
+                self.assertEqual(send("DELETE", "uah-live/a")["status"], 204)
+                self.assertEqual(send("DELETE", "uah-live/a")["status"], 404)
+                self.assertEqual(send("GET", "uah-live/a")["status"], 404)
+                self.assertEqual(json.loads((root / "remote.json").read_text())["objects"],
+                                 {"uah-live/large": {"etag": '"new.etag/+==:3"', "body_size": len(large),
+                                                     "body_sha256": hashlib.sha256(large).hexdigest()}})
+                with self.assertRaises(ValueError):
+                    request(root, ["-q", "--config", "-"], 'url = "https://elsewhere.invalid/bucket/key"')
 
     result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(FixtureChecks))
     return 0 if result.wasSuccessful() else 1

@@ -3560,6 +3560,10 @@ fn status_reads_last_atomic_state_while_operation_lock_is_held() {
     expected["next_action"] = json!("setup");
     expected["remediation"] =
         json!(["Run setup to register with the shared hub and initialize the schedule"]);
+    // This Bot has no machine.id, shared cache, or live.json.
+    expected["machine"] = Value::Null;
+    expected["role"] = Value::Null;
+    expected["live"] = Value::Null;
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
         expected
