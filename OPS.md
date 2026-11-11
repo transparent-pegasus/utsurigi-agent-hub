@@ -105,8 +105,9 @@ No per-record incremental transfer or fixed latency is guaranteed.
 ## Live sync
 
 `live check` syncs the files chosen with `live define` across the Bot's runtimes
-within minutes. Call it every minute; it prints `{"skipped":true}` until
-`status.live.next_check`. A check reads only the hub index
+within minutes on R2. With `google-drive` or `local`, checks read the local
+repositories; other machines see changes only after the Bot transfers them.
+Call it every minute; it prints `{"skipped":true}` until `status.live.next_check`. A check reads only the hub index
 (`uah-live/index.json` in the shared repository): one GET. Lists, objects, and hub
 snapshots are fetched only after the index moved. Hub rules still arrive through
 the verified shared import, so `status.active_shared` stays the authority.
@@ -129,8 +130,6 @@ root stays on the runtime that saw the conflict.
 directory and never edits existing files; it needs the target's password and write
 access. Cost: one R2 Class B read per check per Bot runtime, so 50 Bots on two
 machines stay inside the free tier even with every check at 60 seconds.
-With `google-drive` or `local`, checks read the local repositories; other machines
-see changes only after the Bot transfers them.
 
 ## Local cleanup and data scope
 

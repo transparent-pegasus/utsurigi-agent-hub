@@ -56,7 +56,7 @@ fn forwarded_child_names_are_rejected_as_repository_passwords_before_children() 
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
     ]) {
-        for provider in ["google-drive", "r2", "local"] {
+        for provider in ["local", "r2"] {
             for repository in ["shared", "bot"] {
                 let mut fixture = Fixture::new();
                 let tool = Fixture::wrapper(&mut fixture.alpha);

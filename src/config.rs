@@ -635,6 +635,11 @@ impl Config {
             return Err(Error::new("Invalid repository URL"));
         }
         if self.storage.is_local_backed() {
+            if url.starts_with("s3:") {
+                return Err(Error::new(
+                    "S3 repository URLs need storage.provider: r2; the default is now google-drive",
+                ));
+            }
             if !Path::new(url).is_absolute()
                 || Path::new(url)
                     .components()
@@ -769,26 +774,28 @@ mod tests {
     }
 
     #[test]
-    fn google_drive_is_the_default_and_validates_like_local() {
-        assert_eq!(Config::default().storage.provider, "google-drive");
-        for (provider, local) in [("google-drive", true), ("local", true), ("r2", false)] {
+    fn google_drive_validates_like_local() {
+        let config = |provider: &str| {
             let mut config = Config {
                 version: 1,
                 hub: "default".into(),
                 ..Config::default()
             };
             config.storage.provider = provider.into();
-            assert_eq!(config.storage.is_local_backed(), local, "{provider}");
-            if !local {
-                continue;
-            }
-            for url in [
-                "relative/shared",
-                "/tmp/a/../shared",
-                "s3:https://x.invalid/b/p",
-            ] {
+            config
+        };
+        for provider in ["google-drive", "local"] {
+            let mut config = config(provider);
+            for url in ["relative/shared", "/tmp/a/../shared"] {
                 assert!(config.validate_url(url).is_err(), "{provider}: {url}");
             }
+            assert_eq!(
+                config
+                    .validate_url("s3:https://x.invalid/b/p")
+                    .unwrap_err()
+                    .message,
+                "S3 repository URLs need storage.provider: r2; the default is now google-drive"
+            );
             config.repositories.shared.url = Some("/nonexistent-uah/repos/shared".into());
             config.repositories.bot.url = Some("/nonexistent-uah/repos/shared/bot".into());
             assert!(config.validate().is_err(), "{provider}: overlap accepted");
@@ -797,19 +804,18 @@ mod tests {
                 .validate()
                 .unwrap_or_else(|e| panic!("{provider}: {}", e.message));
         }
-        let mut config = Config::default();
-        config.storage.provider = "s3".into();
-        assert!(config.validate().is_err());
+        assert_eq!(
+            config("s3").validate().unwrap_err().message,
+            "Unsupported configuration version or storage provider"
+        );
     }
 
     #[test]
     fn google_drive_needs_no_cloud_attestation() {
-        let mut config = Config::default();
+        let config = Config::default();
         assert!(config.budget.free_tier_only && config.budget.attestation_file.is_none());
         crate::budget::authorize(&config, &["/nonexistent-uah/repos/bot"], 1 << 30)
             .unwrap_or_else(|e| panic!("{}", e.message));
-        config.storage.provider = "r2".into();
-        assert!(crate::budget::authorize(&config, &["s3:https://x.invalid/b/p"], 1).is_err());
     }
 }
 

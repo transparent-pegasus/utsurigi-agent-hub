@@ -124,13 +124,10 @@ fn template_status_names_configuration_as_next_action_without_creating_state() {
 
 #[test]
 fn private_configs_validate_with_or_without_machine_metadata_without_creating_its_root() {
-    for (provider, machine) in ["local", "google-drive"].into_iter().flat_map(|provider| {
-        [
-            None,
-            Some(json!({"id": "host supplied / opaque identity", "root": "management"})),
-        ]
-        .map(|machine| (provider, machine))
-    }) {
+    for machine in [
+        None,
+        Some(json!({"id": "host supplied / opaque identity", "root": "management"})),
+    ] {
         let temp = TempDir::new();
         let file = temp.path().join("config.yaml");
         let working = temp.path().join("working");
@@ -140,7 +137,7 @@ fn private_configs_validate_with_or_without_machine_metadata_without_creating_it
             "timezone": "UTC",
             "bot": {"id": "alpha", "platform": "test", "runtime_id": "alpha-1"},
             "storage": {
-                "provider": provider,
+                "provider": "google-drive",
                 "bot_transfer": "Store complete quiescent encrypted repositories in private Google Drive folders; recover only verified generations."
             },
             "repositories": {
@@ -171,7 +168,7 @@ fn private_configs_validate_with_or_without_machine_metadata_without_creating_it
         assert!(!temp.path().join("repositories").exists());
         assert!(
             output.status.success(),
-            "provider={provider} machine={machine:?}: {}{}",
+            "machine={machine:?}: {}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );

@@ -140,7 +140,7 @@ impl Fixture {
                 "hub": "default",
                 "timezone": "UTC",
                 "bot": {"id": id, "platform": "test", "runtime_id": runtime},
-                "storage": {"provider": "local"},
+                "storage": {"provider": "google-drive"},
                 "encryption": {"executable": restic::executable(), "version": "0.19.1"},
                 "repositories": {
                     "shared": {

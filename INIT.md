@@ -66,7 +66,8 @@ ASK agreement; missing/null checks cannot replace this dialogue.
 
 - `storage.provider`: "Which backup destination and account should we use: Google
   Drive through this Bot's connector (recommended), R2 (account and bucket), S3,
-  or another store?"
+  or another store?" Cross-machine live sync within minutes needs R2; with Drive,
+  other machines see changes after each Bot transfer.
 
 - `secrets.provider`: Investigate [delivery options](SECRETS.md) first, preferring
   secrets SaaS connectors, then the Bot service's Vault, then other secure host
@@ -375,7 +376,7 @@ attachment does not undo disclosure.
 
 ## Storage and first backup
 
-Recommended: Google Drive through the Bot platform's connector (Grok Bot or Muse).
+Recommended: Google Drive through the Bot platform's connector (GrokBot or Muse).
 Set `storage.provider: google-drive` (the default) with distinct absolute local
 repository paths. The CLI treats it as `local`: encrypted restic repositories stay
 at those paths, with no cloud credentials and no CLI cloud attestation; the CLI
@@ -386,8 +387,8 @@ connector capabilities, quotas, and costs; honor `budget.free_tier_only`. For S3
 or another store moved by the Bot, use `storage.provider: local` the same way.
 
 Option: R2. Bundled cloud scripts support R2 only and run it without Bot transfer
-work, so R2 uses less Bot token than other storage. Set `storage.provider: r2` and
-provision object-scoped R2 access. With `budget.free_tier_only`, writes require
+work, so R2 uses fewer model tokens than other storage. Set `storage.provider: r2`
+and provision object-scoped R2 access. With `budget.free_tier_only`, writes require
 a JSON attestation at `budget.attestation_file`, owned by the process user with
 owner-only permissions (0600). It contains `expires_at` (RFC3339),
 `repositories` (exact URLs), and `max_source_bytes` (integer). Issue it only
