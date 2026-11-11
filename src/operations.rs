@@ -657,7 +657,7 @@ fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> 
         Err(error) => return Err(error),
     };
     let store = HeadStore::new(config)?;
-    let can_read_head = config.storage.provider != "local"
+    let can_read_head = !config.storage.is_local_backed()
         || Path::new(
             config
                 .repositories
@@ -985,7 +985,7 @@ fn destination(config: &Config, path: &Path) -> Result<std::path::PathBuf> {
             "Restore destination must not replace the imports root",
         ));
     }
-    if config.storage.provider == "local" {
+    if config.storage.is_local_backed() {
         for url in [
             &config.repositories.bot.url,
             &config.repositories.shared.url,

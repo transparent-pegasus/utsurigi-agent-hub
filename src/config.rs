@@ -91,11 +91,19 @@ pub struct Storage {
 impl Default for Storage {
     fn default() -> Self {
         Self {
-            provider: "r2".into(),
+            provider: "google-drive".into(),
             class: "standard".into(),
             credentials_ref: None,
             bot_transfer: None,
         }
+    }
+}
+
+impl Storage {
+    /// Providers whose restic repositories are local paths. For `google-drive`
+    /// the Bot moves the encrypted repositories through its connector.
+    pub fn is_local_backed(&self) -> bool {
+        matches!(self.provider.as_str(), "google-drive" | "local")
     }
 }
 
@@ -503,7 +511,9 @@ impl Config {
         if !identity(&self.hub) {
             return Err(Error::new("Invalid hub name"));
         }
-        if self.version != 1 || !["local", "r2"].contains(&self.storage.provider.as_str()) {
+        if self.version != 1
+            || !["google-drive", "r2", "local"].contains(&self.storage.provider.as_str())
+        {
             return Err(Error::new(
                 "Unsupported configuration version or storage provider",
             ));
@@ -567,7 +577,7 @@ impl Config {
         {
             return Err(Error::new("Shared and Bot repositories must be separate"));
         }
-        if self.storage.provider == "local"
+        if self.storage.is_local_backed()
             && let (Some(shared), Some(bot)) =
                 (&self.repositories.shared.url, &self.repositories.bot.url)
             && (Path::new(shared).starts_with(bot) || Path::new(bot).starts_with(shared))
@@ -624,7 +634,12 @@ impl Config {
         if url.is_empty() || url.contains(['\n', '\r', '\0']) {
             return Err(Error::new("Invalid repository URL"));
         }
-        if self.storage.provider == "local" {
+        if self.storage.is_local_backed() {
+            if url.starts_with("s3:") {
+                return Err(Error::new(
+                    "S3 repository URLs need storage.provider: r2; the default is now google-drive",
+                ));
+            }
             if !Path::new(url).is_absolute()
                 || Path::new(url)
                     .components()
@@ -756,6 +771,51 @@ mod tests {
         let template: Config = parse_yaml(include_bytes!("../config.yaml"), "template")
             .unwrap_or_else(|e| panic!("{}", e.message));
         assert_eq!(omitted, template);
+    }
+
+    #[test]
+    fn google_drive_validates_like_local() {
+        let config = |provider: &str| {
+            let mut config = Config {
+                version: 1,
+                hub: "default".into(),
+                ..Config::default()
+            };
+            config.storage.provider = provider.into();
+            config
+        };
+        for provider in ["google-drive", "local"] {
+            let mut config = config(provider);
+            for url in ["relative/shared", "/tmp/a/../shared"] {
+                assert!(config.validate_url(url).is_err(), "{provider}: {url}");
+            }
+            assert_eq!(
+                config
+                    .validate_url("s3:https://x.invalid/b/p")
+                    .unwrap_err()
+                    .message,
+                "S3 repository URLs need storage.provider: r2; the default is now google-drive"
+            );
+            config.repositories.shared.url = Some("/nonexistent-uah/repos/shared".into());
+            config.repositories.bot.url = Some("/nonexistent-uah/repos/shared/bot".into());
+            assert!(config.validate().is_err(), "{provider}: overlap accepted");
+            config.repositories.bot.url = Some("/nonexistent-uah/repos/bot".into());
+            config
+                .validate()
+                .unwrap_or_else(|e| panic!("{provider}: {}", e.message));
+        }
+        assert_eq!(
+            config("s3").validate().unwrap_err().message,
+            "Unsupported configuration version or storage provider"
+        );
+    }
+
+    #[test]
+    fn google_drive_needs_no_cloud_attestation() {
+        let config = Config::default();
+        assert!(config.budget.free_tier_only && config.budget.attestation_file.is_none());
+        crate::budget::authorize(&config, &["/nonexistent-uah/repos/bot"], 1 << 30)
+            .unwrap_or_else(|e| panic!("{}", e.message));
     }
 }
 

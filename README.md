@@ -20,10 +20,12 @@ Read BOT.md first, then INIT.md; follow their references to other Markdown guide
 
 ## Features
 
-- External data: encrypted storage and recovery, through R2 or the Bot.
+- External data: encrypted storage and recovery, through Google Drive via the
+  Bot's connector (default), R2, or other stores via the Bot.
 - Named hubs: choose each Bot's hub during setup.
 - Live sync: tasks and rules reach the Bot's other machines and peers within
-  minutes, one read per check. See [OPS](OPS.md#live-sync).
+  minutes on R2, one read per check; with Bot transfer, after each transfer.
+  See [OPS](OPS.md#live-sync).
 - Periodic review: prefer native Bot features when equivalent or better.
 - Setup through dialogue.
 - Required [shared tasks](TASKS.md): dependencies, user waits, goals, logs, and archived history across Bots.
@@ -59,10 +61,16 @@ Give Bots in one hub+machine the same `paths.imports` root. See
 
 ## Requirements
 
-Bundled cloud scripts: R2 only. For S3, Google Cloud Storage, Google Drive, etc.,
+Bundled cloud scripts: R2 only. R2 uses fewer model tokens than other storage:
+the scripts run it without Bot transfer work. For S3, Google Cloud Storage, etc.,
 write your own or ask your Bot to build them through dialogue.
 
 For trusted Bots under one owner. Requires Unix and Rust.
 Validated on Linux only.
 Optional memory also needs C/C++ build tools; on Debian, run `apt install g++`.
 See [optional memory](optional/README.md) for runtime and migration requirements.
+
+## Upgrading
+
+Before updating an installed checkout, follow [upgrading](upgrading/README.md).
+It lists the per-version migration guides.

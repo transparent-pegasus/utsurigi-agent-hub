@@ -13,13 +13,13 @@ machine:
   # The registry stores only its per-hub hash (status.machine).
   root: null # Host policy: reuse the existing shared management location.
 storage:
-  provider: r2 # CLI: r2 or local.
+  provider: google-drive # CLI: google-drive, r2, or local. google-drive = local + Bot transfer.
   class: standard # Operator policy; no extra S3 header.
-  # Host provisions the bucket and injects object-scoped AWS credentials securely.
+  # R2: host provisions the bucket and injects object-scoped AWS credentials securely.
   # Prefer secrets SaaS connectors, then the Bot service's Vault; see SECRETS.md.
   # Final fallback: private 0600 .env beside this config (process env wins).
   credentials_ref: null
-  bot_transfer: null # Host policy: remote destinations and transfer/recovery policy.
+  bot_transfer: null # Host policy: Bot connector destinations and transfer/recovery policy.
 secrets:
   provider: 1password # Host policy; other providers are allowed.
   confirm_each_access: false # Host policy.

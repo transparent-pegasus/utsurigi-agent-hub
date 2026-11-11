@@ -65,7 +65,8 @@ are ordinary literal values to the Hub's dotenv loader. Do not put secret values
 in arguments, YAML, or the above command. Auth for `op` is the host's responsibility.
 
 R2 storage needs `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally
-`AWS_SESSION_TOKEN`. Provider bootstrap tokens are not restic credentials and
+`AWS_SESSION_TOKEN`; `google-drive` and `local` need none: the CLI never contacts
+remote storage for them. Provider bootstrap tokens are not restic credentials and
 are not forwarded to restic or acquisition curl. Each restic command receives only
 its selected repository password as `RESTIC_PASSWORD`; peer password names are
 not copied wholesale to children.

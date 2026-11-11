@@ -6,6 +6,7 @@ when: >-
   RECOVERY.md: nonzero exit/restore/move/handover/retire/rotate,
   locks/wrong passwords/interrupted setup.
   TASKS.md: task/goal migration, task updates, dependencies, waits, or scheduling guards.
+  upgrading/README.md: updating the checkout or CLI to a newer version.
 ---
 # Agent contract
 
@@ -31,3 +32,4 @@ Read [INIT](INIT.md), [OPS](OPS.md), or [RECOVERY](RECOVERY.md) under the condit
 above. Load [principles](knowledge/principles.md) always; load [practices](knowledge/practices.md) only for feature/policy decisions or reviews.
 After setup, read their copies under `status.active_shared`.
 Keep one authoritative knowledge body per hub; link additions without copying it.
+Before updating this checkout, follow [upgrading](upgrading/README.md).

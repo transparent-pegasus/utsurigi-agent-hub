@@ -64,8 +64,10 @@ ASK agreement; missing/null checks cannot replace this dialogue.
 - `hub`: "Which authorized hub should this Bot join, or should we create one
   (initial candidate: `default`)?"
 
-- `storage.provider`: "Which backup destination and account should we use: R2
-  (account and bucket), an authorized Drive, S3, or another store?"
+- `storage.provider`: "Which backup destination and account should we use: Google
+  Drive through this Bot's connector (recommended), R2 (account and bucket), S3,
+  or another store?" Cross-machine live sync within minutes needs R2; with Drive,
+  other machines see changes after each Bot transfer.
 
 - `secrets.provider`: Investigate [delivery options](SECRETS.md) first, preferring
   secrets SaaS connectors, then the Bot service's Vault, then other secure host
@@ -89,10 +91,10 @@ ASK agreement; missing/null checks cannot replace this dialogue.
   instructions take priority; proxy, gateway, and model-routing features are excluded." Record
   the answer in shared `decisions.yaml` and each Bot's YAML; joining Bots reuse it.
 
-- `storage.bot_transfer`, only for `local` storage or when an external destination
-  or transfer policy needs deciding: "Which destination and automatic or assisted
-  transfer and recovery policy should we use?" Local snapshots do not prove
-  external backup completion.
+- `storage.bot_transfer`, only for `google-drive` or `local` storage or when an
+  external destination or transfer policy needs deciding: "Which destination and
+  automatic or assisted transfer and recovery policy should we use?" Local
+  snapshots do not prove external backup completion.
 
 - `budget.free_tier_only`, only after the free tier is proven insufficient:
   "Should we reduce scope to fit the free tier, or authorize paid use?" Never
@@ -374,19 +376,24 @@ attachment does not undo disclosure.
 
 ## Storage and first backup
 
-Provision object-scoped R2 access. With `budget.free_tier_only`, writes require
+Recommended: Google Drive through the Bot platform's connector (GrokBot or Muse).
+Set `storage.provider: google-drive` (the default) with distinct absolute local
+repository paths. The CLI treats it as `local`: encrypted restic repositories stay
+at those paths, with no cloud credentials and no CLI cloud attestation; the CLI
+never contacts Drive. The Bot moves complete encrypted repositories to and from
+Drive through its connector. Record Drive folders and transfer/recovery policy in
+`storage.bot_transfer` as one prose string; the CLI does not execute it. Check
+connector capabilities, quotas, and costs; honor `budget.free_tier_only`. For S3
+or another store moved by the Bot, use `storage.provider: local` the same way.
+
+Option: R2. Bundled cloud scripts support R2 only and run it without Bot transfer
+work, so R2 uses fewer model tokens than other storage. Set `storage.provider: r2`
+and provision object-scoped R2 access. With `budget.free_tier_only`, writes require
 a JSON attestation at `budget.attestation_file`, owned by the process user with
 owner-only permissions (0600). It contains `expires_at` (RFC3339),
 `repositories` (exact URLs), and `max_source_bytes` (integer). Issue it only
 after checking account usage, quota, billing, and encryption overhead. Unknown
-costs keep writes held; the CLI does not audit billing. Local repositories need no
-CLI cloud attestation.
-
-If the user has no R2 storage, use an authorized Google Drive, S3, or other store
-through the Bot. Set `storage.provider: local` with distinct absolute local repository
-paths. Record remote destinations and transfer/recovery policy in
-`storage.bot_transfer` as one prose string; the CLI does not execute it. Check
-transfer capabilities, quotas, and costs; honor `budget.free_tier_only`.
+costs keep writes held; the CLI does not audit billing.
 
 Assign one transfer coordinator per repository. Reconcile the latest complete
 remote generation before local operations and coordinate all writers. Transfer
@@ -395,7 +402,8 @@ and private access boundaries. Never upload plaintext sources or secrets, copy
 live repositories, or merge divergent copies. Publish a new generation only after
 verification; retain the prior verified generation until its successor is recoverable.
 
-In this fallback, `sync` success and timestamps confirm only local snapshots.
+With Bot transfer (`google-drive`, `local`), `sync` success and timestamps
+confirm only local snapshots.
 Track remote completion and pending transfers separately from `status.next_due`.
 If transfer cannot be verified, report it pending and keep originals. For recovery,
 fetch a verified generation into a fresh local directory. In a private recovery

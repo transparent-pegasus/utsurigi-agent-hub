@@ -105,8 +105,9 @@ No per-record incremental transfer or fixed latency is guaranteed.
 ## Live sync
 
 `live check` syncs the files chosen with `live define` across the Bot's runtimes
-within minutes. Call it every minute; it prints `{"skipped":true}` until
-`status.live.next_check`. A check reads only the hub index
+within minutes on R2. With `google-drive` or `local`, checks read the local
+repositories; other machines see changes only after the Bot transfers them.
+Call it every minute; it prints `{"skipped":true}` until `status.live.next_check`. A check reads only the hub index
 (`uah-live/index.json` in the shared repository): one GET. Lists, objects, and hub
 snapshots are fetched only after the index moved. Hub rules still arrive through
 the verified shared import, so `status.active_shared` stays the authority.
@@ -146,7 +147,8 @@ backups. Secrets, Git internals, model weights, generated indexes, and logs rema
 excluded. Keep local originals until successful synchronization is verified.
 Use the [setup acceptance criteria](INIT.md#acceptance-criteria) for the first
 backup and [recovery drills](RECOVERY.md): `restic check`, restore, and byte-for-byte
-comparison to the captured source/export. Bot-managed transfer also needs
+comparison to the captured source/export. Bot-managed transfer (`google-drive`,
+`local`) also needs
 verification of a freshly retrieved remote generation. A successful local sync
 does not prove that.
 Keep fallback `.env` files beside private configs, outside data roots; remove

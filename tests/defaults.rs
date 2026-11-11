@@ -27,7 +27,7 @@ fn public_defaults_match_the_exact_onboarding_schedule_and_feature_contract() {
         (vec!["bot", "role"], Value::Null),
         (vec!["machine", "id"], Value::Null),
         (vec!["machine", "root"], Value::Null),
-        (vec!["storage", "provider"], json!("r2")),
+        (vec!["storage", "provider"], json!("google-drive")),
         (vec!["storage", "class"], json!("standard")),
         (vec!["storage", "credentials_ref"], Value::Null),
         (vec!["storage", "bot_transfer"], Value::Null),
@@ -137,7 +137,7 @@ fn private_configs_validate_with_or_without_machine_metadata_without_creating_it
             "timezone": "UTC",
             "bot": {"id": "alpha", "platform": "test", "runtime_id": "alpha-1"},
             "storage": {
-                "provider": "local",
+                "provider": "google-drive",
                 "bot_transfer": "Store complete quiescent encrypted repositories in private Google Drive folders; recover only verified generations."
             },
             "repositories": {
