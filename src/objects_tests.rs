@@ -75,6 +75,16 @@ fn open(config: &Config, repository: &Path) -> ObjectStore {
 }
 
 #[test]
+fn google_drive_uses_the_local_repository_path() {
+    let (_root, mut config, repository) = local();
+    config.storage.provider = "google-drive".into();
+    must(config.validate());
+    let store = open(&config, &repository);
+    assert_eq!(must(store.put(KEY, b"x", Condition::Create)), Written::Yes);
+    assert_eq!(fs::read(repository.join(KEY)).unwrap(), b"x");
+}
+
+#[test]
 fn local_create_get_match_and_delete() {
     let (_root, config, repository) = local();
     let store = open(&config, &repository);

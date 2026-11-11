@@ -145,11 +145,12 @@ migration decision supplement separately; unchanged knowledge and existing decis
 bytes must match. Other missing, extra, or different files fail. `restore --verify` alone is
 insufficient. If the original is lost, report that source-byte equality cannot be
 retested; successful integrity verification is not evidence of that comparison.
-For Bot-managed remote transfers, fetch a complete verified encrypted generation
-into a fresh directory and check/restore that copy. Retain the previous generation
-and originals until all applicable [acceptance criteria](INIT.md#acceptance-criteria)
-pass. Delete the temporary plaintext comparison copy after successful acceptance;
-keep the original sources according to their approved retention policy.
+For Bot-managed remote transfers (`google-drive`, `local`), fetch a complete
+verified encrypted generation into a fresh directory and check/restore that copy.
+Retain the previous generation and originals until all applicable
+[acceptance criteria](INIT.md#acceptance-criteria) pass. Delete the temporary
+plaintext comparison copy after successful acceptance; keep the original sources
+according to their approved retention policy.
 
 Incomplete/uncertain writes never authorize deletion of the prior successful
 version. With `sync.versioning: true` (default), a completed predecessor expires

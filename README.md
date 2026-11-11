@@ -20,7 +20,8 @@ Read BOT.md first, then INIT.md; follow their references to other Markdown guide
 
 ## Features
 
-- External data: encrypted storage and recovery, through R2 or the Bot.
+- External data: encrypted storage and recovery, through Google Drive via the
+  Bot's connector (default), R2, or other stores via the Bot.
 - Named hubs: choose each Bot's hub during setup.
 - Live sync: tasks and rules reach the Bot's other machines and peers within
   minutes, one read per check. See [OPS](OPS.md#live-sync).
@@ -59,8 +60,13 @@ Give Bots in one hub+machine the same `paths.imports` root. See
 
 ## Requirements
 
-Bundled cloud scripts: R2 only. For S3, Google Cloud Storage, Google Drive, etc.,
-write your own or ask your Bot to build them through dialogue.
+Bundled cloud scripts: R2 only. R2 uses less Bot token than other storage: the
+scripts run it without Bot transfer work. The default, Google Drive, goes through
+the Bot platform's connector (Grok Bot or Muse). For S3, Google Cloud Storage,
+etc., write your own or ask your Bot to build them through dialogue.
+
+Upgrading: `storage.provider` now defaults to `google-drive`. Configs that omitted
+it used R2; set `provider: r2` explicitly to keep R2.
 
 For trusted Bots under one owner. Requires Unix and Rust.
 Validated on Linux only.

@@ -27,7 +27,7 @@ fn public_defaults_match_the_exact_onboarding_schedule_and_feature_contract() {
         (vec!["bot", "role"], Value::Null),
         (vec!["machine", "id"], Value::Null),
         (vec!["machine", "root"], Value::Null),
-        (vec!["storage", "provider"], json!("r2")),
+        (vec!["storage", "provider"], json!("google-drive")),
         (vec!["storage", "class"], json!("standard")),
         (vec!["storage", "credentials_ref"], Value::Null),
         (vec!["storage", "bot_transfer"], Value::Null),
@@ -124,10 +124,13 @@ fn template_status_names_configuration_as_next_action_without_creating_state() {
 
 #[test]
 fn private_configs_validate_with_or_without_machine_metadata_without_creating_its_root() {
-    for machine in [
-        None,
-        Some(json!({"id": "host supplied / opaque identity", "root": "management"})),
-    ] {
+    for (provider, machine) in ["local", "google-drive"].into_iter().flat_map(|provider| {
+        [
+            None,
+            Some(json!({"id": "host supplied / opaque identity", "root": "management"})),
+        ]
+        .map(|machine| (provider, machine))
+    }) {
         let temp = TempDir::new();
         let file = temp.path().join("config.yaml");
         let working = temp.path().join("working");
@@ -137,7 +140,7 @@ fn private_configs_validate_with_or_without_machine_metadata_without_creating_it
             "timezone": "UTC",
             "bot": {"id": "alpha", "platform": "test", "runtime_id": "alpha-1"},
             "storage": {
-                "provider": "local",
+                "provider": provider,
                 "bot_transfer": "Store complete quiescent encrypted repositories in private Google Drive folders; recover only verified generations."
             },
             "repositories": {
@@ -168,7 +171,7 @@ fn private_configs_validate_with_or_without_machine_metadata_without_creating_it
         assert!(!temp.path().join("repositories").exists());
         assert!(
             output.status.success(),
-            "machine={machine:?}: {}{}",
+            "provider={provider} machine={machine:?}: {}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );

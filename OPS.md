@@ -129,6 +129,8 @@ root stays on the runtime that saw the conflict.
 directory and never edits existing files; it needs the target's password and write
 access. Cost: one R2 Class B read per check per Bot runtime, so 50 Bots on two
 machines stay inside the free tier even with every check at 60 seconds.
+With `google-drive` or `local`, checks read the local repositories; other machines
+see changes only after the Bot transfers them.
 
 ## Local cleanup and data scope
 
@@ -146,7 +148,8 @@ backups. Secrets, Git internals, model weights, generated indexes, and logs rema
 excluded. Keep local originals until successful synchronization is verified.
 Use the [setup acceptance criteria](INIT.md#acceptance-criteria) for the first
 backup and [recovery drills](RECOVERY.md): `restic check`, restore, and byte-for-byte
-comparison to the captured source/export. Bot-managed transfer also needs
+comparison to the captured source/export. Bot-managed transfer (`google-drive`,
+`local`) also needs
 verification of a freshly retrieved remote generation. A successful local sync
 does not prove that.
 Keep fallback `.env` files beside private configs, outside data roots; remove
