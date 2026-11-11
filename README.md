@@ -72,5 +72,5 @@ See [optional memory](optional/README.md) for runtime and migration requirements
 
 ## Upgrading
 
-`storage.provider` now defaults to `google-drive`. Configs that omitted it used
-R2; set `provider: r2` explicitly to keep R2.
+Before updating an installed checkout, follow [upgrading](upgrading/README.md).
+It lists the per-version migration guides.
