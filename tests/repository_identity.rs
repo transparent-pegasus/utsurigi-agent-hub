@@ -172,15 +172,19 @@ fn legacy_records_at_an_unchanged_url_are_accepted_and_the_next_revision_is_vers
     let fixture = Fixture::new();
     let alpha = &fixture.alpha;
     fixture.ok(alpha, &["setup"]);
-    let legacy = accept_legacy(&fixture, alpha);
+    accept_legacy(&fixture, alpha);
     fixture.ok(alpha, &["sync"]);
     fixture.author_current(alpha);
+    // Re-serialized: still bound to today's URL (a), no longer byte-identical to the head's (b).
+    for name in [REVISION, DECISIONS] {
+        let path = alpha.path("shared").join(name);
+        let record: Value = serde_saphyr::from_slice(&fs::read(&path).unwrap()).unwrap();
+        write(&path, serde_json::to_vec_pretty(&record).unwrap());
+    }
+    let decided = fs::read(alpha.path("shared").join(DECISIONS)).unwrap();
     fixture.ok(alpha, &["registry", "publish"]);
     assert_version_3(&fixture, alpha);
-    assert_eq!(
-        head_file(&fixture, alpha, DECISIONS),
-        fs::read(legacy.join(DECISIONS)).unwrap()
-    );
+    assert_eq!(head_file(&fixture, alpha, DECISIONS), decided);
 }
 
 #[test]
@@ -191,6 +195,10 @@ fn relocated_host_imports_legacy_records_and_publishes_from_a_byte_identical_bas
     relocate(fixture.temp.path(), &mut fixture.alpha, "shared");
     let alpha = &fixture.alpha;
     fixture.ok(alpha, &["sync"]);
+    // Live check takes this legacy import, hashed for the old URL, as its hub mark.
+    let live: Value =
+        serde_json::from_slice(&fixture.ok(alpha, &["live", "check"]).stdout).unwrap();
+    assert_eq!(live["checked"], true, "{live}");
     fixture.author_current(alpha);
     fixture.ok(alpha, &["registry", "publish"]);
     assert_version_3(&fixture, alpha);
@@ -230,6 +238,11 @@ fn bases_bound_to_another_path_or_repository_are_refused_keeping_head_and_edits(
         decisions(&format!("version: 2\nrepository_id: \"{wrong}\"")),
     );
     refused(&fixture, alpha, DECISION_SCOPE);
+    // Base and active import are legacy N; rule (b) compares with head N+1, imported by this publish.
+    fixture.ok(alpha, &["sync"]);
+    fixture.author_current(alpha);
+    accept_legacy(&fixture, alpha);
+    refused(&fixture, alpha, AUTHORING_BASE);
 }
 
 #[test]
