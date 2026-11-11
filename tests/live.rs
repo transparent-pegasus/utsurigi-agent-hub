@@ -75,7 +75,13 @@ fn machine(fixture: &Fixture, runtime: &str, id: Option<&str>) -> Bot {
 fn machines() -> (Fixture, Bot) {
     let fixture = primary();
     let secondary = machine(&fixture, "alpha-2", Some("machine-2"));
-    let hash = status(&fixture, &secondary)["machine"]
+    register(&fixture, &secondary);
+    (fixture, secondary)
+}
+
+// The primary lists the secondary's status.machine in the Bot's registry machines.
+fn register(fixture: &Fixture, secondary: &Bot) {
+    let hash = status(fixture, secondary)["machine"]
         .as_str()
         .expect("status must report the machine hash")
         .to_owned();
@@ -92,7 +98,6 @@ fn machines() -> (Fixture, Bot) {
     entry["machines"] = json!([hash]);
     fs::write(&path, serde_json::to_vec_pretty(&registry).unwrap()).unwrap();
     fixture.ok(primary, &["registry", "publish"]);
-    (fixture, secondary)
 }
 
 fn status(fixture: &Fixture, bot: &Bot) -> Value {
@@ -602,6 +607,27 @@ fn unlisted_machine_is_rejected() {
     assert_eq!(status(&fixture, &unlisted)["role"], Value::Null);
     // The listed machine passes the same membership check.
     assert_eq!(check(&fixture, &secondary).paths("pulled"), ["tasks/a.md"]);
+}
+
+#[test]
+fn check_before_registration_passes_once_listed() {
+    let fixture = primary();
+    let primary = &fixture.alpha;
+    write(primary.path("owned").join("tasks/a.md"), TASK);
+    define(&fixture, primary, &["--task", "tasks/"]);
+    check(&fixture, primary);
+    let secondary = machine(&fixture, "alpha-2", Some("machine-2"));
+    // The first check caches a hub whose registry does not list this machine yet.
+    let stderr = rejected(&fixture.cli(&secondary, &["live", "check"]));
+    assert!(stderr.contains(NOT_LISTED), "{stderr}");
+    let stale = fixture.active_shared(&secondary);
+
+    register(&fixture, &secondary);
+    let listed = check(&fixture, &secondary);
+    assert_eq!(listed.paths("pulled"), ["tasks/a.md"]);
+    assert_eq!(listed.report["hub_changed"], true, "{}", listed.report);
+    assert_ne!(fixture.active_shared(&secondary), stale);
+    assert_eq!(status(&fixture, &secondary)["role"], "secondary");
 }
 
 #[test]
