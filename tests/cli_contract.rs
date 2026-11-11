@@ -2689,12 +2689,15 @@ fn registry_privacy_assert_current_base(fixture: &Fixture) {
         &fs::read(fixture.alpha.path("shared").join("shared-revision.json")).unwrap(),
     )
     .unwrap();
+    let repository = fixture.restic(&fixture.alpha, "shared", &["cat", "config"]);
+    success(&repository);
+    let repository: Value = serde_json::from_slice(&repository.stdout).unwrap();
     assert_eq!(
         marker,
         json!({
-            "version": 2,
+            "version": 3,
             "hub": head["hub"],
-            "repository_sha256": format!("{:x}", Sha256::digest(fixture.alpha.repository("shared").as_bytes())),
+            "repository_id": repository["id"],
             "revision": head["revision"],
         }),
         "privacy rejection must start from a valid current authoring base"
@@ -2882,7 +2885,8 @@ fn registry_privacy_publication_refuses_uninspectable_prior_shared_repositories(
         let registry = fixture.alpha.path("shared").join("registry.yaml");
         registry_privacy_stage_registry(&fixture, &tool, &registry);
         fixture.registry(&fixture.alpha, &[&fixture.alpha, &beta, &gamma]);
-        for (name, digit) in [("shared", "a"), ("alpha", "b"), ("gamma", "c")] {
+        // The shared repository keeps its real ID, which the authoring base names.
+        for (name, digit) in [("alpha", "b"), ("gamma", "c")] {
             fs::write(
                 tool.join(format!("repository-config-{name}")),
                 json!({"id": digit.repeat(64)}).to_string(),

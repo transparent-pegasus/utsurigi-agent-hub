@@ -1,5 +1,5 @@
 use crate::config::{Config, Repository, absolute, identity, no_symlinks};
-use crate::decisions::{self, Decisions};
+use crate::decisions::{self, Decisions, Scope, Source};
 use crate::error::{Error, IoContext, Result};
 use crate::head::{Head, HeadStore, ObservedHead};
 use crate::history::History;
@@ -22,26 +22,30 @@ use std::path::Path;
 const REVISION_FILE: &str = "shared-revision.json";
 const CAS_ATTEMPTS: usize = 16;
 
-#[derive(Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Revision {
     version: u32,
     hub: String,
-    repository_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repository_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repository_id: Option<String>,
     revision: u64,
 }
 
 impl Revision {
-    fn new(config: &Config, revision: u64) -> Self {
+    fn new(config: &Config, id: &str, revision: u64) -> Self {
         Self {
-            version: 2,
+            version: 3,
             hub: config.hub.clone(),
-            repository_sha256: decisions::repository_sha256(config),
+            repository_sha256: None,
+            repository_id: Some(id.to_owned()),
             revision,
         }
     }
 
-    fn load(root: &Path, config: &Config) -> Result<Self> {
+    fn load(root: &Path, config: &Config, source: Source<'_>) -> Result<Self> {
         let path = root.join(REVISION_FILE);
         no_symlinks(&path)?;
         let invalid = || {
@@ -51,7 +55,18 @@ impl Revision {
         };
         let bytes = fs::read(path).map_err(|_| invalid())?;
         let revision: Self = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
-        if revision.revision == 0 || revision != Self::new(config, revision.revision) {
+        let scope = Scope::of(
+            revision.version,
+            3,
+            revision.repository_id.as_deref(),
+            revision.repository_sha256.as_deref(),
+        );
+        if revision.revision == 0
+            || revision.hub != config.hub
+            || !scope.is_some_and(|scope| {
+                source.accepts(scope, &decisions::repository_sha256(config), &bytes)
+            })
+        {
             return Err(invalid());
         }
         Ok(revision)
@@ -76,6 +91,9 @@ struct ImportedData {
     registry: Registry,
     history: History,
     tasks: Option<crate::tasks::Collection>,
+    // The head's own files: a relocated host may publish them unchanged as legacy records.
+    revision_file: Vec<u8>,
+    decisions_file: Option<Vec<u8>>,
 }
 
 struct Imported {
@@ -368,7 +386,7 @@ pub(crate) fn hub_mark(config: &Config) -> Result<Option<HubMark>> {
         .expect("shared version directory")
         .to_owned();
     Ok(Some(HubMark {
-        revision: Revision::load(&path, config)?.revision,
+        revision: Revision::load(&path, config, Source::Imported)?.revision,
         snapshot,
     }))
 }
@@ -422,9 +440,9 @@ fn import_shared(config: &Config, restic: &Restic<'_>) -> Result<Imported> {
             selection::validate_import(path)?;
             let registry = Registry::load(path, config)?;
             let history = History::load(path, &registry)?;
-            Decisions::load(path, config)?;
+            Decisions::load(path, config, Source::Imported)?;
             let tasks = crate::tasks::load_shared(path)?;
-            if Revision::load(path, config)?.revision != observed.head.revision {
+            if Revision::load(path, config, Source::Imported)?.revision != observed.head.revision {
                 return Err(Error::new(
                     "Shared snapshot revision does not match its accepted head",
                 ));
@@ -433,6 +451,8 @@ fn import_shared(config: &Config, restic: &Restic<'_>) -> Result<Imported> {
                 registry,
                 history,
                 tasks,
+                revision_file: fs::read(path.join(REVISION_FILE))?,
+                decisions_file: fs::read(path.join(decisions::FILE)).ok(),
             })
         },
     )?;
@@ -499,11 +519,11 @@ fn shared_budget(config: &Config, bytes: u64) -> Result<()> {
     )
 }
 
-fn rewrite_metadata(config: &Config, data: &mut Prepared, revision: u64) -> Result<()> {
+fn rewrite_metadata(config: &Config, data: &mut Prepared, revision: u64, id: &str) -> Result<()> {
     data.registry.write(&mut data.export)?;
     data.export.remove("registry-history.json")?;
     data.history.write(&mut data.export)?;
-    Revision::new(config, revision).write(&mut data.export)
+    Revision::new(config, id, revision).write(&mut data.export)
 }
 
 // This callback is also run on the retained capture after a durable-fence restart.
@@ -514,11 +534,19 @@ fn prepare_initial(
     source: Option<&Path>,
     legacy_retry: bool,
 ) -> Result<Prepared> {
+    // None until ensure initializes a new shared repository.
+    let id = match restic.shared_repository_id() {
+        Ok(id) => Some(id),
+        Err(error) if error.code == 10 => None,
+        Err(error) => return Err(error),
+    };
+    let local = Source::Local { id, head: None };
     let mut data = if let Some(source) = source {
         let registry = LegacyRegistry::load(source, config)?.convert(config)?;
         let history = History::load(source, &registry)?;
         let mut export = selection::copy_verified(config, source)?;
-        decisions::supplement(&mut export, config)?;
+        // A migration source was restored from the shared repository, so its ID exists.
+        decisions::supplement(&mut export, config, restic.shared_repository_id()?)?;
         Prepared {
             registry,
             history,
@@ -527,7 +555,7 @@ fn prepare_initial(
     } else {
         let root = config.paths.shared.as_ref().expect("runtime configuration");
         let registry = Registry::initial(root, config, legacy_retry)?;
-        Decisions::load(root, config)?;
+        Decisions::load(root, config, local)?;
         let export = selection::export(config, true)?;
         if export
             .tree
@@ -545,7 +573,7 @@ fn prepare_initial(
             export,
         }
     };
-    Decisions::load(data.export.tree.path(), config)?;
+    Decisions::load(data.export.tree.path(), config, local)?;
     if source.is_some() {
         crate::tasks::ensure_export(&mut data.export)?;
     }
@@ -556,14 +584,14 @@ fn prepare_initial(
     data.history.observe(&data.registry, config, restic, true)?;
     data.history.check(&data.registry, restic)?;
     private_repository(config, restic, &data.history)?;
-    rewrite_metadata(config, &mut data, 1)?;
+    // Before ensure initializes a new shared repository, this candidate is only
+    // preflight input: the placeholder reserves the fixed-width ID for the budget.
+    rewrite_metadata(config, &mut data, 1, id.unwrap_or(&"0".repeat(64)))?;
     // Reserve the fixed-width master IDs of repositories that setup is about to
     // initialize. The callback after ensure's initialization uses actual IDs.
-    let mut pending_ids = 0u64;
-    for repository in std::iter::once(&config.repositories.shared)
-        .chain(config.sharing.bot_data.then_some(&config.repositories.bot))
-    {
-        match restic.repository_id(repository) {
+    let mut pending_ids = u64::from(id.is_none());
+    if config.sharing.bot_data {
+        match restic.repository_id(&config.repositories.bot) {
             Err(error) if error.code == 10 => pending_ids += 1,
             Err(error) => return Err(error),
             Ok(_) => (),
@@ -695,7 +723,7 @@ fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> 
                 data.history.observe(&data.registry, config, restic, true)?;
                 data.history.check(&data.registry, restic)?;
                 private_repository(config, restic, &data.history)?;
-                rewrite_metadata(config, &mut data, 1)?;
+                rewrite_metadata(config, &mut data, 1, restic.shared_repository_id()?)?;
                 shared_budget(config, data.export.bytes)?;
                 prepared = Some(data);
                 Ok(())
@@ -763,7 +791,7 @@ fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> 
             .checked_add(1)
             .ok_or_else(|| Error::new("Shared revision overflow"))?;
         if changed || tasks_changed || previous_history != data.history {
-            rewrite_metadata(config, &mut data, revision)?;
+            rewrite_metadata(config, &mut data, revision, restic.shared_repository_id()?)?;
             shared_budget(config, data.export.bytes)?;
         }
         restic.initialize(&config.repositories.bot)?;
@@ -773,7 +801,7 @@ fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> 
         let history_changed = previous_history != data.history;
         let mut predecessors = Vec::new();
         if changed || tasks_changed || history_changed {
-            rewrite_metadata(config, &mut data, revision)?;
+            rewrite_metadata(config, &mut data, revision, restic.shared_repository_id()?)?;
             shared_budget(config, data.export.bytes)?;
             if !commit_candidate(
                 config,
@@ -850,15 +878,30 @@ fn sync(config: &Config, restic: &Restic<'_>, state: &mut State, scheduled: bool
 
 fn publish(config: &Config, restic: &Restic<'_>, takeover: bool) -> Result<()> {
     let mut export = selection::export(config, true)?;
-    let base = Revision::load(export.tree.path(), config)?;
     let mut imported = import_shared(config, restic)?;
+    let id = restic.shared_repository_id()?;
+    let base = Revision::load(
+        export.tree.path(),
+        config,
+        Source::Local {
+            id: Some(id),
+            head: Some(&imported.data.revision_file),
+        },
+    )?;
     if base.revision != imported.observed.head.revision {
         return Err(Error::new(
             "Stale authoring revision base; copy verified active_shared, omit generated registry-history.json, and reconcile edits before publishing; local work was preserved",
         ));
     }
     let candidate = Registry::load(export.tree.path(), config)?;
-    Decisions::load(export.tree.path(), config)?;
+    Decisions::load(
+        export.tree.path(),
+        config,
+        Source::Local {
+            id: Some(id),
+            head: imported.data.decisions_file.as_deref(),
+        },
+    )?;
     let tasks = crate::tasks::require_shared(export.tree.path())?;
     crate::tasks::check_transition(imported.data.tasks.as_ref(), Some(&tasks))?;
     if !takeover
@@ -894,7 +937,7 @@ fn publish(config: &Config, restic: &Restic<'_>, takeover: bool) -> Result<()> {
         .revision
         .checked_add(1)
         .ok_or_else(|| Error::new("Shared revision overflow"))?;
-    Revision::new(config, revision).write(&mut export)?;
+    Revision::new(config, id, revision).write(&mut export)?;
     budget::authorize(
         config,
         &[config
@@ -1133,3 +1176,7 @@ fn prune(config: &Config, restic: &Restic<'_>) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "operations_tests.rs"]
+mod tests;
