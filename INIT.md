@@ -65,9 +65,10 @@ ASK agreement; missing/null checks cannot replace this dialogue.
   (initial candidate: `default`)?"
 
 - `storage.provider`: "Which backup destination and account should we use: Google
-  Drive through this Bot's connector (recommended), R2 (account and bucket), S3,
-  or another store?" Cross-machine live sync within minutes needs R2; with Drive,
-  other machines see changes after each Bot transfer.
+  Drive through this Bot's connector (recommended for a hub run from one machine),
+  R2 (account and bucket), S3, or another store?" With Drive or another store the
+  Bot moves (`local`), one machine writes the hub. Secondary runtimes on other
+  machines, receive-only Bots elsewhere, and cross-service `live request` need R2.
 
 - `secrets.provider`: Investigate [delivery options](SECRETS.md) first, preferring
   secrets SaaS connectors, then the Bot service's Vault, then other secure host
@@ -196,7 +197,9 @@ YAML, replace `machine.*`, `paths.*`, and `bot.platform`, and generate a new
 `bot.runtime_id` once for that machine. Prepare restic as below. After every Bot in
 the hub uses a CLI that knows `machines`, add the secondary's `status.machine` to
 the Bot's registry `machines` with `registry publish`. Secondaries never run
-`setup`, `sync`, or `prune`; they read other Bot data with `pull`.
+`setup`, `sync`, or `prune`; they read other Bot data with `pull`. With
+`google-drive` or `local`, one machine writes the hub, so a secondary on another
+machine needs R2.
 
 At setup and after file-layout changes, choose the real-time files (tasks and
 rules) and run `live define --task DIR/ --rule FILE` with paths inside
@@ -204,7 +207,8 @@ rules) and run `live define --task DIR/ --rule FILE` with paths inside
 Schedule `live check` every minute with native scheduling. If the platform cannot
 wake every minute (for example server cron with a sleeping sandbox) and the user
 needs requests from Bots on other services, suggest a receive-only Bot that runs
-`live check` every minute. See [OPS](OPS.md#live-sync).
+`live check` every minute. With `google-drive` or `local`, run it on the hub's
+machine; requests from Bots on other machines need R2. See [OPS](OPS.md#live-sync).
 
 ### Paths and storage
 
@@ -376,30 +380,38 @@ attachment does not undo disclosure.
 
 ## Storage and first backup
 
-Recommended: Google Drive through the Bot platform's connector (GrokBot or Muse).
-Set `storage.provider: google-drive` (the default) with distinct absolute local
-repository paths. The CLI treats it as `local`: encrypted restic repositories stay
-at those paths, with no cloud credentials and no CLI cloud attestation; the CLI
-never contacts Drive. The Bot moves complete encrypted repositories to and from
-Drive through its connector. Record Drive folders and transfer/recovery policy in
-`storage.bot_transfer` as one prose string; the CLI does not execute it. Check
-connector capabilities, quotas, and costs; honor `budget.free_tier_only`. For S3
-or another store moved by the Bot, use `storage.provider: local` the same way.
+Recommended for a hub run from one machine: Google Drive through the Bot
+platform's connector (GrokBot or Muse). Set `storage.provider: google-drive` (the
+default) with distinct absolute local repository paths. The CLI treats it as
+`local`: encrypted restic repositories stay at those paths, with no cloud
+credentials and no CLI cloud attestation; the CLI never contacts Drive. The Bot
+moves complete encrypted repositories to and from Drive through its connector.
+Record Drive folders and transfer/recovery policy in `storage.bot_transfer` as one
+prose string; the CLI does not execute it. Check connector capabilities, quotas,
+and costs; honor `budget.free_tier_only`. For S3 or another store moved by the
+Bot, use `storage.provider: local` the same way.
 
-Option: R2. Bundled cloud scripts support R2 only and run it without Bot transfer
-work, so R2 uses fewer model tokens than other storage. Set `storage.provider: r2`
-and provision object-scoped R2 access. With `budget.free_tier_only`, writes require
+Option: R2, required when more than one machine writes the hub. Bundled cloud
+scripts support R2 only and run it without Bot transfer work, so R2 uses fewer
+model tokens than other storage. Set `storage.provider: r2` and provision
+object-scoped R2 access. With `budget.free_tier_only`, writes require
 a JSON attestation at `budget.attestation_file`, owned by the process user with
 owner-only permissions (0600). It contains `expires_at` (RFC3339),
 `repositories` (exact URLs), and `max_source_bytes` (integer). Issue it only
 after checking account usage, quota, billing, and encryption overhead. Unknown
 costs keep writes held; the CLI does not audit billing.
 
-Assign one transfer coordinator per repository. Reconcile the latest complete
-remote generation before local operations and coordinate all writers. Transfer
-complete encrypted repositories only while quiescent, preserving registry history
-and private access boundaries. Never upload plaintext sources or secrets, copy
-live repositories, or merge divergent copies. Publish a new generation only after
+Assign one transfer coordinator per repository. With Bot transfer (`google-drive`,
+`local`), one machine writes the hub: its Bots and runtimes use the same local
+repositories. The CLI's compare-and-swap covers only those copies, and transfer
+never merges copies, so writes on another machine's copy between transfers are
+lost without an error. To move the hub to another machine, stop every writer,
+transfer the latest verified generation, and hand over as in
+[RECOVERY](RECOVERY.md#restore-and-handover): one writer at a time. Reconcile the
+latest complete remote generation before local operations. Transfer complete
+encrypted repositories only while quiescent, preserving registry history and
+private access boundaries. Never upload plaintext sources or secrets, copy live
+repositories, or merge divergent copies. Publish a new generation only after
 verification; retain the prior verified generation until its successor is recoverable.
 
 With Bot transfer (`google-drive`, `local`), `sync` success and timestamps

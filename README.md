@@ -21,10 +21,11 @@ Read BOT.md first, then INIT.md; follow their references to other Markdown guide
 ## Features
 
 - External data: encrypted storage and recovery, through Google Drive via the
-  Bot's connector (default), R2, or other stores via the Bot.
+  Bot's connector (default; one machine writes the hub), R2, or other stores via
+  the Bot.
 - Named hubs: choose each Bot's hub during setup.
-- Live sync: tasks and rules reach the Bot's other machines and peers within
-  minutes on R2, one read per check; with Bot transfer, after each transfer.
+- Live sync: tasks and rules reach the Bot's other runtimes and peers within
+  minutes, one read per check; across machines, on R2 only.
   See [OPS](OPS.md#live-sync).
 - Periodic review: prefer native Bot features when equivalent or better.
 - Setup through dialogue.
