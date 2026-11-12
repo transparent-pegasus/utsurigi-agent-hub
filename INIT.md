@@ -412,7 +412,8 @@ repositories. The CLI's compare-and-swap covers only those copies, and transfer
 never merges copies, so writes on another machine's copy between transfers are
 lost without an error. To move the hub to another machine, stop every writer,
 transfer the latest verified generation, and hand over as in
-[RECOVERY](RECOVERY.md#restore-and-handover): one writer at a time. Reconcile the
+[RECOVERY](RECOVERY.md#restore-and-handover): one writer at a time; copies at new
+paths follow the [move steps](upgrading/0.2.0.md). Reconcile the
 latest complete remote generation before local operations. Transfer complete
 encrypted repositories only while quiescent, preserving registry history and
 private access boundaries. Never upload plaintext sources or secrets, copy live
