@@ -5,7 +5,7 @@ This compiles metadata ONLY against PLAN Task 2 declarations and the real base
 Config/error modules. The declaration methods panic and are NEVER executed.
 This check is not backend RED/GREEN evidence. Product verification, after
 inclusion by the head author, is:
-  cargo test --locked --bin utsurigi-agent-hub head::tests:: -- --test-threads=1
+  cargo test --locked --bin utsurigi head::tests:: -- --test-threads=1
 """
 
 import ast
@@ -22,12 +22,12 @@ def main():
         ast.parse(path.read_text(), filename=str(path))
         print("Python syntax OK:", path.name, flush=True)
     subprocess.run(
-        ["cargo", "test", "--locked", "--offline", "--bin", "utsurigi-agent-hub", "--no-run"],
+        ["cargo", "test", "--locked", "--offline", "--bin", "utsurigi", "--no-run"],
         cwd=root, timeout=120, check=True,
     )
     deps = root / "target/debug/deps"
     externs = []
-    for name in ("serde", "serde_json", "serde_saphyr", "globset", "tempfile", "libc", "utsurigi_agent_hub"):
+    for name in ("serde", "serde_json", "serde_saphyr", "globset", "tempfile", "libc", "utsurigi"):
         candidates = list(deps.glob(f"lib{name}-*.rlib"))
         if not candidates:
             raise RuntimeError("missing cached build dependency " + name)

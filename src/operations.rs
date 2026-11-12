@@ -1088,6 +1088,7 @@ fn restore_selected(
         .parent()
         .ok_or_else(|| Error::new("Invalid restore destination"))?;
     let mut builder = tempfile::Builder::new();
+    // Stored identifier; keep the old name: interrupted restores leave staging with this prefix.
     builder.prefix(".utsurigi-agent-hub-restore-");
     #[cfg(unix)]
     {

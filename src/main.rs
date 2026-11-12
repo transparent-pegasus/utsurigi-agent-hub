@@ -24,7 +24,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
-    name = "utsurigi-agent-hub",
+    name = "utsurigi",
     version,
     about = "Encrypted Bot storage and fleet coordination"
 )]

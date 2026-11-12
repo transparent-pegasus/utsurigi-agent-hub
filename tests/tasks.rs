@@ -14,7 +14,7 @@ struct Case {
 }
 
 fn command(config: &std::path::Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_utsurigi-agent-hub"))
+    Command::new(env!("CARGO_BIN_EXE_utsurigi"))
         .env_clear()
         .arg("--config")
         .arg(config)

@@ -41,7 +41,7 @@ schedule: null
 due: 2026-11-15T23:59+09:00
 workdir: /workspace/uah-intro-4bots
 requires:
-  - repo: transparent-pegasus/utsurigi-agent-hub
+  - repo: transparent-pegasus/utsurigi
   - secret: utsurigi-r2-credentials
 start_after: []
 done_when: []
@@ -125,16 +125,16 @@ requirement only blocks completion; it does not prevent useful work from startin
 
 ## Commands and concurrent updates
 
-Use the normal `utsurigi-agent-hub --config BOT_YAML` prefix:
+Use the normal `utsurigi --config BOT_YAML` prefix:
 
 ```sh
-utsurigi-agent-hub --config BOT_YAML tasks init
-utsurigi-agent-hub --config BOT_YAML tasks create 'Prepare migration'
-utsurigi-agent-hub --config BOT_YAML tasks show UUID
-utsurigi-agent-hub --config BOT_YAML tasks put --file TASK_DRAFT.md --if-match ETAG
-utsurigi-agent-hub --config BOT_YAML tasks validate
-utsurigi-agent-hub --config BOT_YAML tasks index
-utsurigi-agent-hub --config BOT_YAML registry publish
+utsurigi --config BOT_YAML tasks init
+utsurigi --config BOT_YAML tasks create 'Prepare migration'
+utsurigi --config BOT_YAML tasks show UUID
+utsurigi --config BOT_YAML tasks put --file TASK_DRAFT.md --if-match ETAG
+utsurigi --config BOT_YAML tasks validate
+utsurigi --config BOT_YAML tasks index
+utsurigi --config BOT_YAML registry publish
 ```
 
 Create starts in `pending`. Show returns metadata, body, and the SHA-256 ETag of

@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const HELPER: &str = "__uah-migration-fence";
 pub(crate) const FENCE_FILE: &str = "format-fence.json";
+// Stored identifier; keep the old name: existing format fences carry this type.
 const FENCE_TYPE: &str = "utsurigi-agent-hub/format-fence";
 const CAPTURE_KIND: &str = "migration-capture";
 const MAX_FENCE_BYTES: u64 = 16 * 1024;
