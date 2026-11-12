@@ -637,7 +637,7 @@ impl Config {
         if self.storage.is_local_backed() {
             if url.starts_with("s3:") {
                 return Err(Error::new(
-                    "S3 repository URLs need storage.provider: r2; the default is now google-drive",
+                    "s3: repository URLs require storage.provider: r2 (an omitted provider means google-drive); google-drive and local use absolute local paths",
                 ));
             }
             if !Path::new(url).is_absolute()
@@ -804,7 +804,7 @@ mod tests {
                     .validate_url("s3:https://x.invalid/b/p")
                     .unwrap_err()
                     .message,
-                "S3 repository URLs need storage.provider: r2; the default is now google-drive"
+                "s3: repository URLs require storage.provider: r2 (an omitted provider means google-drive); google-drive and local use absolute local paths"
             );
             config.repositories.shared.url = Some("/nonexistent-uah/repos/shared".into());
             config.repositories.bot.url = Some("/nonexistent-uah/repos/shared/bot".into());
