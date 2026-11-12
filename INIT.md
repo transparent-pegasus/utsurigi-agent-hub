@@ -135,9 +135,12 @@ For Caveman, distinguish an explicit hub-wide user decision from a template valu
 only the former overrides the Bot-specific default derived from its capabilities.
 Keep Bot-specific values in the Bot's YAML and their basis in hub knowledge.
 Record hub-wide Caveman values in shared `decisions.yaml` using the [typed schema](src/decisions.rs):
-`version: 1`, the configured `hub`, and `repository_sha256`, plus a `caveman` mapping.
-The digest is the lowercase SHA-256 of the configured shared URL's UTF-8 bytes,
-verbatim, without an added newline. The mapping requires boolean `enabled`,
+`version: 2`, the configured `hub`, and `repository_id`, plus a `caveman` mapping.
+Copy `repository_id` from `shared-revision.json` in the verified `status.active_shared`.
+Until a 0.2.0 `setup` or `registry publish` has written it there, use `version: 1`
+with `repository_sha256` instead; version 1 is still accepted. That digest is the
+lowercase SHA-256 of the configured shared URL's UTF-8 bytes, verbatim, without an
+added newline. The mapping requires boolean `enabled`,
 `basis` (`user_decision` or `derived_default`), nonempty `source` and `recorded_by`,
 and RFC3339 `recorded_at`. Set `original_decision_at` to its known RFC3339 time or
 `null`; do not invent it. `user_decision` requires explicit hub-wide confirmation;

@@ -22,6 +22,33 @@ pub struct History {
     repository_ids: BTreeSet<String>,
 }
 
+/// Repositories that `History::observe` accepts as missing (restic exit 10).
+pub enum Missing<'a> {
+    /// Any; a repository may not be initialized yet.
+    Allowed,
+    /// Only a previously shared local repository that moved: the candidate
+    /// registry lists the same Bot at a repository that opens with an ID of the
+    /// history taken before this publish observed anything.
+    Moved(&'a Registry, &'a History),
+}
+
+impl Missing<'_> {
+    fn accepts(&self, bot: Option<&str>, config: &Config, restic: &Restic<'_>) -> bool {
+        match self {
+            Self::Allowed => true,
+            Self::Moved(candidate, known) => {
+                config.storage.is_local_backed()
+                    && candidate.bots.iter().any(|entry| {
+                        Some(entry.id.as_str()) == bot
+                            && restic
+                                .repository_id(&entry.repository())
+                                .is_ok_and(|id| known.repository_ids.contains(&id))
+                    })
+            }
+        }
+    }
+}
+
 impl History {
     pub fn new() -> Self {
         Self {
@@ -88,16 +115,16 @@ impl History {
         registry: &Registry,
         config: &Config,
         restic: &Restic<'_>,
-        allow_missing: bool,
+        missing: Missing<'_>,
     ) -> Result<()> {
-        let repositories = std::iter::once(config.repositories.shared.clone()).chain(
+        let repositories = std::iter::once((None, config.repositories.shared.clone())).chain(
             registry
                 .bots
                 .iter()
                 .filter(|entry| entry.shared)
-                .map(|entry| entry.repository()),
+                .map(|entry| (Some(entry.id.as_str()), entry.repository())),
         );
-        for repository in repositories {
+        for (bot, repository) in repositories {
             self.repository_urls.insert(
                 repository
                     .url
@@ -124,7 +151,7 @@ impl History {
                     Ok(id) => {
                         self.repository_ids.insert(id);
                     }
-                    Err(error) if allow_missing && error.code == 10 => (),
+                    Err(error) if error.code == 10 && missing.accepts(bot, config, restic) => (),
                     Err(error) => return Err(error),
                 }
             }
@@ -207,3 +234,7 @@ impl History {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "history_tests.rs"]
+mod tests;
