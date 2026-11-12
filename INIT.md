@@ -68,7 +68,8 @@ ASK agreement; missing/null checks cannot replace this dialogue.
   Drive through this Bot's connector (recommended for a hub run from one machine),
   R2 (account and bucket), S3, or another store?" With Drive or another store the
   Bot moves (`local`), one machine writes the hub. Secondary runtimes on other
-  machines, receive-only Bots elsewhere, and cross-service `live request` need R2.
+  machines, receive-only Bots elsewhere, and `live request` from other machines
+  need R2.
 
 - `secrets.provider`: Investigate [delivery options](SECRETS.md) first, preferring
   secrets SaaS connectors, then the Bot service's Vault, then other secure host
