@@ -104,7 +104,7 @@ host must withhold unneeded peer passwords. An unavailable prior repository
 holds publication; exit 10 is not permission to forget its history. The exception
 is a moved `google-drive` or `local` repository: a prior shared repository missing
 at its registered path is accepted when the published registry names the same Bot
-at a copy whose restic ID the history already holds
+at a repository whose restic ID the history already holds, such as an exact copy
 ([moving repositories](upgrading/0.2.0.md)).
 
 Unrecognized snapshot metadata or a snapshot from another hub blocks operations on that
