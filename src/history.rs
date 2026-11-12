@@ -1,11 +1,11 @@
-use crate::config::{Config, Repository, env_name, no_symlinks};
+use crate::config::{Config, Repository, env_name, identity, no_symlinks};
 use crate::error::{Error, IoContext, Result};
-use crate::registry::Registry;
+use crate::registry::{Entry, Registry};
 use crate::restic::{Restic, hex_digest, password};
 use crate::selection::Export;
 use crate::state::private_file;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -20,6 +20,10 @@ pub struct History {
     password_refs: BTreeSet<String>,
     password_envs: BTreeSet<String>,
     repository_ids: BTreeSet<String>,
+    /// The IDs each Bot's shared repository has had. Version 1 has none, so a
+    /// Bot absent here may have IDs recorded only in `repository_ids`.
+    #[serde(default)]
+    bot_repository_ids: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// Repositories that `History::observe` accepts as missing (restic exit 10).
@@ -27,8 +31,8 @@ pub enum Missing<'a> {
     /// Any; a repository may not be initialized yet.
     Allowed,
     /// Only a previously shared local repository that moved: the candidate
-    /// registry lists the same Bot at a repository that opens with an ID of the
-    /// history taken before this publish observed anything.
+    /// registry lists the same Bot at a repository that the history taken
+    /// before this publish observed anything attributes to that Bot.
     Moved(&'a Registry, &'a History),
 }
 
@@ -39,10 +43,7 @@ impl Missing<'_> {
             Self::Moved(candidate, known) => {
                 config.storage.is_local_backed()
                     && candidate.bots.iter().any(|entry| {
-                        Some(entry.id.as_str()) == bot
-                            && restic
-                                .repository_id(&entry.repository())
-                                .is_ok_and(|id| known.repository_ids.contains(&id))
+                        Some(entry.id.as_str()) == bot && known.attributes(entry, config, restic)
                     })
             }
         }
@@ -52,15 +53,54 @@ impl Missing<'_> {
 impl History {
     pub fn new() -> Self {
         Self {
-            version: 1,
+            version: 2,
             ..Self::default()
         }
     }
 
-    pub fn pending_master_bytes(&self, count: u64) -> u64 {
+    /// Bytes that new restic master IDs add, `bot` naming the Bot whose
+    /// pending shared repository is one of them.
+    pub fn pending_master_bytes(&self, count: u64, bot: Option<&str>) -> u64 {
         // A JSON string ID is 66 bytes, plus one comma except for the first
         // item in an empty array. New restic master IDs have fixed width.
-        count * 67 - u64::from(count > 0 && self.repository_ids.is_empty())
+        let ids = count * 67 - u64::from(count > 0 && self.repository_ids.is_empty());
+        // The Bot's ID is listed again under the Bot: `"<bot>":[<ID>]` if new.
+        ids + bot.map_or(0, |bot| match self.bot_repository_ids.get(bot) {
+            Some(listed) => 67 - u64::from(listed.is_empty()),
+            None => bot.len() as u64 + 71 + u64::from(!self.bot_repository_ids.is_empty()),
+        })
+    }
+
+    /// Whether `entry`'s repository opens with an ID of that Bot. A Bot
+    /// without per-Bot IDs (recorded before version 2) is attributed a known
+    /// ID only by its repository's snapshots, which all must be that Bot's.
+    fn attributes(&self, entry: &Entry, config: &Config, restic: &Restic<'_>) -> bool {
+        let repository = entry.repository();
+        let Ok(id) = restic.repository_id(&repository) else {
+            return false;
+        };
+        if let Some(ids) = self.bot_repository_ids.get(&entry.id) {
+            return ids.contains(&id);
+        }
+        self.repository_ids.contains(&id)
+            && restic
+                .shared_repository_id()
+                .is_ok_and(|shared| shared != id)
+            && !self
+                .bot_repository_ids
+                .values()
+                .any(|ids| ids.contains(&id))
+            && restic.snapshots(&repository).is_ok_and(|snapshots| {
+                !snapshots.is_empty()
+                    && snapshots.iter().all(|snapshot| {
+                        snapshot.tag("bot:") == Some(entry.id.as_str())
+                            && snapshot.tag("hub:") == Some(config.hub.as_str())
+                            && !snapshot
+                                .tags
+                                .iter()
+                                .any(|tag| tag == "kind:shared" || tag == "kind:shared-v2")
+                    })
+            })
     }
 
     pub fn load(root: &Path, registry: &Registry) -> Result<Self> {
@@ -74,11 +114,12 @@ impl History {
         if !metadata.is_file() {
             return Err(invalid());
         }
-        let history: Self = serde_json::from_slice(
+        let mut history: Self = serde_json::from_slice(
             &fs::read(&path).at("Cannot read shared identifier history", &path)?,
         )
         .map_err(|_| invalid())?;
-        if history.version != 1
+        if !matches!(history.version, 1 | 2)
+            || (history.version == 1 && !history.bot_repository_ids.is_empty())
             || history.repository_urls.is_empty()
             || history.password_envs.is_empty()
             || history.repository_ids.is_empty()
@@ -92,6 +133,14 @@ impl History {
                 .any(|reference| reference.is_empty())
             || history.password_envs.iter().any(|name| !env_name(name))
             || history.repository_ids.iter().any(|id| !hex_digest(id))
+            // A known ID has 64 hex digits; a Bot's IDs are also lowercase.
+            || history.bot_repository_ids.iter().any(|(bot, ids)| {
+                !identity(bot)
+                    || ids.iter().any(|id| {
+                        !history.repository_ids.contains(id)
+                            || id.bytes().any(|c| c.is_ascii_uppercase())
+                    })
+            })
         {
             return Err(invalid());
         }
@@ -107,6 +156,8 @@ impl History {
                 return Err(invalid());
             }
         }
+        // Version 1 loads as version 2 without per-Bot IDs; nothing writes version 1.
+        history.version = 2;
         Ok(history)
     }
 
@@ -149,6 +200,12 @@ impl History {
             if password(&repository).is_ok() {
                 match restic.repository_id(&repository) {
                     Ok(id) => {
+                        if let Some(bot) = bot {
+                            self.bot_repository_ids
+                                .entry(bot.to_owned())
+                                .or_default()
+                                .insert(id.clone());
+                        }
                         self.repository_ids.insert(id);
                     }
                     Err(error) if error.code == 10 && missing.accepts(bot, config, restic) => (),

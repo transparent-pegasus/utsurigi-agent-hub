@@ -4,7 +4,7 @@ mod common;
 use common::*;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -13,13 +13,16 @@ const PROPOSAL: &str = "proposal.md";
 // Today's refusal when a previously shared repository is missing at its registered URL.
 const MISSING: &str = "restic bot repository operation failed (exit 10: repository does not exist)";
 
+// Version 2, field for field.
 #[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 struct History {
     version: u32,
     repository_urls: BTreeSet<String>,
     password_refs: BTreeSet<String>,
     password_envs: BTreeSet<String>,
     repository_ids: BTreeSet<String>,
+    bot_repository_ids: BTreeMap<String, BTreeSet<String>>,
 }
 
 fn repository_id(fixture: &Fixture, bot: &Bot, repository: &str) -> String {
@@ -58,8 +61,17 @@ fn author_from(source: &Path, bot: &Bot) {
     fs::remove_file(bot.path("shared").join("registry-history.json")).unwrap();
 }
 
-// The copies keep their restic IDs and password names, so the history only gains their URLs.
+// The copies keep their restic IDs and password names, so the history only gains their URLs. The
+// Bot's IDs already list its repository's copy.
 fn assert_published_after_move(fixture: &Fixture, bot: &Bot, revision: u64, mut history: History) {
+    assert_eq!(history.version, 2);
+    assert_eq!(
+        history.bot_repository_ids,
+        BTreeMap::from([(
+            bot.config["bot"]["id"].as_str().unwrap().to_owned(),
+            BTreeSet::from([repository_id(fixture, bot, "bot")]),
+        )])
+    );
     let revision = revision + 1;
     assert_eq!(fixture.shared_head(bot)["revision"], revision);
     let record: Value = serde_json::from_slice(&head_file(fixture, bot, REVISION)).unwrap();
