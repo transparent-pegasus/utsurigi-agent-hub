@@ -426,7 +426,8 @@ restore using that same repository path and YAML. Keep the prior verified genera
 Before resuming normal operations, reconcile repository locations with the
 accepted shared registry.
 
-For a new hub, create `paths.shared/registry.yaml` using this schema:
+For a new hub, `setup` creates the registry with this Bot as its only entry when
+`paths.shared/registry.yaml` is absent. To write it yourself, use this schema:
 
 ```yaml
 version: 2
@@ -435,17 +436,20 @@ max_bots: 50
 bots:
   - id: first-bot
     runtime_id: generated-runtime
-    repository: "s3:https://ACCOUNT.r2.cloudflarestorage.com/BUCKET/OPAQUE-BOT-PATH"
+    # google-drive or local: the absolute path in repositories.bot.url
+    repository: "/ABSOLUTE/LOCAL/PATH/OPAQUE-BOT-PATH"
+    # r2: repository: "s3:https://ACCOUNT.r2.cloudflarestorage.com/BUCKET/OPAQUE-BOT-PATH"
     password_ref: "secret-provider reference"
     password_env: BOT_PASSWORD
     shared: true
 ```
 
-The URL above is a schema placeholder; replace ACCOUNT, BUCKET, and OPAQUE-BOT-PATH.
-Runtime validation rejects placeholder URLs. Use actual configured values, including
-the selected hub. Bot IDs are unique within a hub's registry and may be reused in
-separate hubs. Each Bot membership gets its own repository; that hub's shared
-knowledge has another.
+The repositories above are schema placeholders. With `google-drive` or `local`, use
+the absolute local path from `repositories.bot.url`. With `r2`, replace ACCOUNT,
+BUCKET, and OPAQUE-BOT-PATH; runtime validation rejects ACCOUNT and BUCKET. Use
+actual configured values, including the selected hub. Bot IDs are unique within a
+hub's registry and may be reused in separate hubs. Each Bot membership gets its
+own repository; that hub's shared knowledge has another.
 Use the configured `budget.max_bots` when initializing the shared limit.
 For an existing hub, `setup` imports the current registry and registers the joining
 Bot automatically. It preserves shared knowledge and migrates v1 hubs automatically.
