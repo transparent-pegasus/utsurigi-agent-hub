@@ -106,8 +106,9 @@ is a moved `google-drive` or `local` repository: a prior shared repository missi
 at its registered path is accepted only when the published registry names the same
 Bot at a repository, such as an exact copy, whose restic ID the history already
 holds for that Bot. For a Bot without IDs of its own in the history, such as one
-recorded before 0.2.0, the ID must instead be in the history and the repository's
-snapshots must all belong to that Bot ([moving repositories](upgrading/0.2.0.md)).
+recorded before 0.2.0, the ID must instead be in the history and the repository
+must hold snapshots that all belong to that Bot
+([moving repositories](upgrading/0.2.0.md)).
 
 Unrecognized snapshot metadata or a snapshot from another hub blocks operations on that
 repository, including restore by a valid ID, until it is reconciled with

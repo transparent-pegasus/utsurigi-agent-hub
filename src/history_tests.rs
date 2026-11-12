@@ -199,6 +199,12 @@ fn missing_local_repository_counts_as_moved_only_to_a_known_id_of_the_same_bot()
     let earlier = known(&[SHARED], &[]);
     // FRESH is known and holds alpha's snapshots, but alpha's IDs do not list it.
     let unlisted = known(&[SHARED, ALPHA, FRESH], &[("alpha", ALPHA)]);
+    // Alpha's IDs list beta's or the hub's, as after alpha was pointed at a copy.
+    let beta_listed = known(
+        &[SHARED, ALPHA, BETA],
+        &[("alpha", ALPHA), ("alpha", BETA), ("beta", BETA)],
+    );
+    let hub_listed = known(&[SHARED, ALPHA], &[("alpha", ALPHA), ("alpha", SHARED)]);
     for (case, config, candidate, known) in [
         ("unknown ID", &local, &fresh, &before),
         ("copy missing too", &local, &previous, &before),
@@ -217,6 +223,18 @@ fn missing_local_repository_counts_as_moved_only_to_a_known_id_of_the_same_bot()
             &local,
             &fresh,
             &unlisted,
+        ),
+        (
+            "copy of another Bot's repository listed for the Bot",
+            &local,
+            &beta_copy,
+            &beta_listed,
+        ),
+        (
+            "copy of the hub repository listed for the Bot",
+            &local,
+            &hub_copy,
+            &hub_listed,
         ),
         // Same transport, r2 configuration: only the provider gate differs.
         ("r2", &r2, &moved, &before),

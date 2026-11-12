@@ -79,17 +79,22 @@ impl History {
         let Ok(id) = restic.repository_id(&repository) else {
             return false;
         };
+        // Two Bots, or a Bot and the hub, never share a repository. So a copy of
+        // the hub's or another Bot's never stands in, even if listed for this Bot.
+        if !restic
+            .shared_repository_id()
+            .is_ok_and(|shared| shared != id)
+            || self
+                .bot_repository_ids
+                .iter()
+                .any(|(bot, ids)| *bot != entry.id && ids.contains(&id))
+        {
+            return false;
+        }
         if let Some(ids) = self.bot_repository_ids.get(&entry.id) {
             return ids.contains(&id);
         }
         self.repository_ids.contains(&id)
-            && restic
-                .shared_repository_id()
-                .is_ok_and(|shared| shared != id)
-            && !self
-                .bot_repository_ids
-                .values()
-                .any(|ids| ids.contains(&id))
             && restic.snapshots(&repository).is_ok_and(|snapshots| {
                 !snapshots.is_empty()
                     && snapshots.iter().all(|snapshot| {
