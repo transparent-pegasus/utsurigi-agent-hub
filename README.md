@@ -62,9 +62,8 @@ Give Bots in one hub+machine the same `paths.imports` root. See
 
 ## Requirements
 
-Bundled cloud scripts: R2 only. R2 uses fewer model tokens than other storage:
-the scripts run it without Bot transfer work. For S3, Google Cloud Storage, etc.,
-write your own or ask your Bot to build them through dialogue.
+Bundled cloud scripts: R2 only. For S3, Google Cloud Storage, etc., write your own
+or ask your Bot to build them through dialogue.
 
 For trusted Bots under one owner. Requires Unix and Rust.
 Validated on Linux only.

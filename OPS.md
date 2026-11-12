@@ -152,9 +152,8 @@ excluded. Keep local originals until successful synchronization is verified.
 Use the [setup acceptance criteria](INIT.md#acceptance-criteria) for the first
 backup and [recovery drills](RECOVERY.md): `restic check`, restore, and byte-for-byte
 comparison to the captured source/export. Bot-managed transfer (`google-drive`,
-`local`) also needs
-verification of a freshly retrieved remote generation. A successful local sync
-does not prove that.
+`local`) also needs verification of a freshly retrieved remote generation. A
+successful local sync does not prove that.
 Keep fallback `.env` files beside private configs, outside data roots; remove
 upload copies as specified in [INIT](INIT.md#attached-env-fallback).
 

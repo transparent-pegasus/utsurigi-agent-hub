@@ -53,10 +53,10 @@ impl HeadStore {
             .as_deref()
             .ok_or_else(|| Error::new("Missing shared repository URL for head"))?;
         config.validate_url(repository)?;
-        let backend = match config.storage.provider.as_str() {
-            _ if config.storage.is_local_backed() => Backend::Local(PathBuf::from(repository)),
-            "r2" => Backend::R2(format!("{}/{HEAD_NAME}", r2_base(repository, SUBJECT)?)),
-            _ => return Err(Error::new("Unsupported head storage provider")),
+        let backend = if config.storage.is_local_backed() {
+            Backend::Local(PathBuf::from(repository))
+        } else {
+            Backend::R2(format!("{}/{HEAD_NAME}", r2_base(repository, SUBJECT)?))
         };
         Ok(Self {
             hub: config.hub.clone(),

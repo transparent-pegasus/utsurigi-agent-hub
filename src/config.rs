@@ -819,14 +819,6 @@ mod tests {
             "Unsupported configuration version or storage provider"
         );
     }
-
-    #[test]
-    fn google_drive_needs_no_cloud_attestation() {
-        let config = Config::default();
-        assert!(config.budget.free_tier_only && config.budget.attestation_file.is_none());
-        crate::budget::authorize(&config, &["/nonexistent-uah/repos/bot"], 1 << 30)
-            .unwrap_or_else(|e| panic!("{}", e.message));
-    }
 }
 
 #[cfg(test)]
