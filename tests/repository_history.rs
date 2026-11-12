@@ -47,6 +47,16 @@ fn assert_known(fixture: &Fixture, bot: &Bot, repository: &str) {
     );
 }
 
+// An earlier publish recorded the substitute's ID under alpha, so alpha's own set cannot refuse it.
+fn assert_claimed(fixture: &Fixture, bot: &Bot, repository: &str) {
+    let id = repository_id(fixture, bot, repository);
+    let ids = bot_repository_ids(fixture, bot);
+    assert!(
+        ids["alpha"].as_array().unwrap().contains(&json!(id)),
+        "{ids}"
+    );
+}
+
 // Shared repositories may share a password. When the moved Bot shares one with another repository,
 // a copy of that repository opens with the Bot's unchanged registry entry, and only its restic ID
 // tells it apart.
@@ -76,6 +86,24 @@ fn full_move(fixture: &Fixture, bot_source: &str) -> Bot {
     }
     successor.save();
     successor
+}
+
+// Points alpha's entry at a copy of `source` while alpha's old Bot repository still exists.
+// Nothing is missing, so the publish needs no move rule, and it records the copy's ID under alpha.
+fn repoint(fixture: &Fixture, source: &str, others: &[&Bot]) -> PathBuf {
+    let alpha = &fixture.alpha;
+    let copy = fixture.temp.path().join("repointed");
+    copy_tree(Path::new(source), &copy);
+    let mut repointed = Bot {
+        file: alpha.file.clone(),
+        config: alpha.config.clone(),
+    };
+    repointed.config["repositories"]["bot"]["url"] = json!(copy);
+    repointed.save();
+    author_from(&fixture.active_shared(alpha), &repointed);
+    fixture.registry(&repointed, &[&[&repointed][..], others].concat());
+    fixture.ok(&repointed, &["registry", "publish"]);
+    copy
 }
 
 fn author_from(source: &Path, bot: &Bot) {
@@ -244,5 +272,41 @@ fn a_version_1_history_refuses_a_copy_of_another_bots_repository() {
     author_from(&legacy, &successor);
     fixture.registry(&successor, &[&successor, &beta]);
     assert_known(&fixture, &successor, "bot");
+    refused(&fixture, &successor);
+}
+
+#[test]
+fn a_bot_once_pointed_at_another_bots_repository_cannot_move_to_a_copy_of_it() {
+    let fixture = Fixture::new();
+    let alpha = &fixture.alpha;
+    fixture.ok(alpha, &["setup"]);
+    let mut beta = fixture.bot("beta", "beta-1");
+    share_password(&mut beta, &alpha.config["repositories"]["bot"]);
+    fixture.ok(&beta, &["setup"]);
+    fixture.ok(alpha, &["sync"]);
+    let copy = repoint(&fixture, beta.repository("bot"), &[&beta]);
+    let successor = full_move(&fixture, beta.repository("bot"));
+    fs::remove_dir_all(copy).unwrap();
+    author_from(&fixture.active_shared(alpha), &successor);
+    fixture.registry(&successor, &[&successor, &beta]);
+    assert_claimed(&fixture, &successor, "bot");
+    refused(&fixture, &successor);
+}
+
+#[test]
+fn a_bot_once_pointed_at_the_hub_repository_cannot_move_to_a_copy_of_it() {
+    let mut fixture = Fixture::new();
+    let hub = fixture.alpha.config["repositories"]["shared"].clone();
+    share_password(&mut fixture.alpha, &hub);
+    fixture.registry(&fixture.alpha, &[&fixture.alpha]);
+    let alpha = &fixture.alpha;
+    fixture.ok(alpha, &["setup"]);
+    let copy = repoint(&fixture, alpha.repository("shared"), &[]);
+    let successor = full_move(&fixture, alpha.repository("shared"));
+    fs::remove_dir_all(copy).unwrap();
+    author_from(&fixture.active_shared(alpha), &successor);
+    fixture.registry(&successor, &[&successor]);
+    // The copy at the Bot path keeps the hub repository's ID.
+    assert_claimed(&fixture, &successor, "shared");
     refused(&fixture, &successor);
 }
