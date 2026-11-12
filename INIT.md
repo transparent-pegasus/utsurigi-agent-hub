@@ -387,9 +387,10 @@ default) with distinct absolute local repository paths. The CLI treats it as
 credentials and no CLI cloud attestation; the CLI never contacts Drive. The Bot
 moves complete encrypted repositories to and from Drive through its connector.
 Record Drive folders and transfer/recovery policy in `storage.bot_transfer` as one
-prose string; the CLI does not execute it. Check connector capabilities, quotas,
-and costs; honor `budget.free_tier_only`. For S3 or another store moved by the
-Bot, use `storage.provider: local` the same way.
+prose string before `setup`; until then `ready` is false and `setup` refuses. The
+CLI does not execute it. Check connector capabilities, quotas, and costs; honor
+`budget.free_tier_only`. For S3 or another store moved by the Bot, use
+`storage.provider: local` the same way.
 
 Option: R2, required when more than one machine writes the hub. Bundled cloud
 scripts support R2 only and run it without Bot transfer work, so R2 uses fewer

@@ -722,6 +722,16 @@ impl Config {
         if self.data.include.is_empty() {
             missing.push("data.include");
         }
+        // google-drive backups leave the machine only through the Bot's transfer policy.
+        if self.storage.provider == "google-drive"
+            && self
+                .storage
+                .bot_transfer
+                .as_deref()
+                .is_none_or(|policy| policy.trim().is_empty())
+        {
+            missing.push("storage.bot_transfer");
+        }
         missing
     }
 
