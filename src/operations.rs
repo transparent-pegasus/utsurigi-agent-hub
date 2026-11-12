@@ -2,7 +2,7 @@ use crate::config::{Config, Repository, absolute, identity, no_symlinks};
 use crate::decisions::{self, Decisions, Scope, Source};
 use crate::error::{Error, IoContext, Result};
 use crate::head::{Head, HeadStore, ObservedHead};
-use crate::history::History;
+use crate::history::{History, Missing};
 use crate::live::format::HubMark;
 use crate::live::policy::Policy;
 use crate::live::state::Live;
@@ -581,7 +581,8 @@ fn prepare_initial(
     crate::tasks::check_transition(None, Some(&tasks))?;
     data.registry.register(config)?;
     data.registry.credentials(config)?;
-    data.history.observe(&data.registry, config, restic, true)?;
+    data.history
+        .observe(&data.registry, config, restic, Missing::Allowed)?;
     data.history.check(&data.registry, restic)?;
     private_repository(config, restic, &data.history)?;
     // Before ensure initializes a new shared repository, this candidate is only
@@ -720,7 +721,8 @@ fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> 
             let result = migration::ensure(config, restic, &mut |source| {
                 let mut data = prepare_initial(config, restic, source, legacy_retry)?;
                 restic.initialize(&config.repositories.bot)?;
-                data.history.observe(&data.registry, config, restic, true)?;
+                data.history
+                    .observe(&data.registry, config, restic, Missing::Allowed)?;
                 data.history.check(&data.registry, restic)?;
                 private_repository(config, restic, &data.history)?;
                 rewrite_metadata(config, &mut data, 1, restic.shared_repository_id()?)?;
@@ -783,7 +785,8 @@ fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> 
         // No Bot repository is initialized until current identity/history checks
         // and the prospective shared candidate budget have all passed.
         let previous_history = data.history.clone();
-        data.history.observe(&data.registry, config, restic, true)?;
+        data.history
+            .observe(&data.registry, config, restic, Missing::Allowed)?;
         let revision = imported
             .observed
             .head
@@ -795,7 +798,8 @@ fn setup(config: &Config, restic: &Restic<'_>, state: &mut State) -> Result<()> 
             shared_budget(config, data.export.bytes)?;
         }
         restic.initialize(&config.repositories.bot)?;
-        data.history.observe(&data.registry, config, restic, true)?;
+        data.history
+            .observe(&data.registry, config, restic, Missing::Allowed)?;
         data.history.check(&data.registry, restic)?;
         private_repository(config, restic, &data.history)?;
         let history_changed = previous_history != data.history;
@@ -918,15 +922,20 @@ fn publish(config: &Config, restic: &Restic<'_>, takeover: bool) -> Result<()> {
             "Runtime change requires explicit --takeover acknowledgement; local work was preserved",
         ));
     }
+    // Taken before this publish observes anything, so a candidate repository
+    // cannot vouch for its own ID.
+    let known = imported.data.history.clone();
     candidate.transition_from(&imported.data.registry, config, restic)?;
+    imported.data.history.observe(
+        &imported.data.registry,
+        config,
+        restic,
+        Missing::Moved(&candidate, &known),
+    )?;
     imported
         .data
         .history
-        .observe(&imported.data.registry, config, restic, false)?;
-    imported
-        .data
-        .history
-        .observe(&candidate, config, restic, true)?;
+        .observe(&candidate, config, restic, Missing::Allowed)?;
     imported.data.history.check(&candidate, restic)?;
     // The authoring input must omit this reserved generated file. Only the
     // accepted current snapshot supplies cumulative identifier history.
