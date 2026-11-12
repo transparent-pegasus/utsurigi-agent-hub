@@ -193,7 +193,9 @@ impl Registry {
                     "Invalid or duplicate registry identity/repository",
                 ));
             }
-            config.validate_url(&entry.repository)?;
+            config.validate_url(&entry.repository).map_err(|error| {
+                Error::new(format!("Registry entry {}: {}", entry.id, error.message))
+            })?;
             let mut machines = HashSet::new();
             if !entry.machines.iter().all(|machine| {
                 machine.len() == 64

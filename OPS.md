@@ -105,9 +105,11 @@ No per-record incremental transfer or fixed latency is guaranteed.
 ## Live sync
 
 `live check` syncs the files chosen with `live define` across the Bot's runtimes
-within minutes on R2. With `google-drive` or `local`, checks read the local
-repositories; other machines see changes only after the Bot transfers them.
-Call it every minute; it prints `{"skipped":true}` until `status.live.next_check`. A check reads only the hub index
+within minutes. With `google-drive` or `local`, checks read the local repositories
+and one machine writes the hub. Transfer never merges copies: when two machines
+write their copies between transfers, one machine's writes are lost without an
+error. Runtimes on other machines need R2. Call it every minute; it prints
+`{"skipped":true}` until `status.live.next_check`. A check reads only the hub index
 (`uah-live/index.json` in the shared repository): one GET. Lists, objects, and hub
 snapshots are fetched only after the index moved. Hub rules still arrive through
 the verified shared import, so `status.active_shared` stays the authority.
@@ -122,14 +124,16 @@ Checks run every `base_seconds` (60) after a change. After `idle_after_seconds`
 else `rule_idle_seconds` (600), with ±10% jitter; set them with `live define`.
 Failures back off and retry; `status.live.failure` names the cause.
 
-Edits on two runtimes between checks keep both: the path takes the stored version,
-and the local edit becomes `NAME.conflict-HASH8.EXT` for the Bot to merge. Copies
-inside a task or rule directory sync like other files; a copy of a single-file
-root stays on the runtime that saw the conflict.
+When runtimes share one store (R2, or one filesystem), edits on two runtimes
+between checks keep both: the path takes the stored version, and the local edit
+becomes `NAME.conflict-HASH8.EXT` for the Bot to merge. Copies inside a task or
+rule directory sync like other files; a copy of a single-file root stays on the
+runtime that saw the conflict.
 `live request BOT_ID --file PATH` adds a new file to a shared Bot's first task
 directory and never edits existing files; it needs the target's password and write
-access. Cost: one R2 Class B read per check per Bot runtime, so 50 Bots on two
-machines stay inside the free tier even with every check at 60 seconds.
+access, and R2 when sent from another machine. Cost: one R2 Class B read per check
+per Bot runtime, so 50 Bots on two machines stay inside the free tier even with
+every check at 60 seconds.
 
 ## Local cleanup and data scope
 
@@ -148,9 +152,8 @@ excluded. Keep local originals until successful synchronization is verified.
 Use the [setup acceptance criteria](INIT.md#acceptance-criteria) for the first
 backup and [recovery drills](RECOVERY.md): `restic check`, restore, and byte-for-byte
 comparison to the captured source/export. Bot-managed transfer (`google-drive`,
-`local`) also needs
-verification of a freshly retrieved remote generation. A successful local sync
-does not prove that.
+`local`) also needs verification of a freshly retrieved remote generation. A
+successful local sync does not prove that.
 Keep fallback `.env` files beside private configs, outside data roots; remove
 upload copies as specified in [INIT](INIT.md#attached-env-fallback).
 

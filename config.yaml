@@ -13,12 +13,14 @@ machine:
   # The registry stores only its per-hub hash (status.machine).
   root: null # Host policy: reuse the existing shared management location.
 storage:
-  provider: google-drive # CLI: google-drive, r2, or local. google-drive = local + Bot transfer.
+  provider: google-drive # CLI: google-drive (default), r2, or local.
+  # google-drive and local keep repositories at local paths; the Bot moves them.
   class: standard # Operator policy; no extra S3 header.
   # R2: host provisions the bucket and injects object-scoped AWS credentials securely.
   # Prefer secrets SaaS connectors, then the Bot service's Vault; see SECRETS.md.
   # Final fallback: private 0600 .env beside this config (process env wins).
   credentials_ref: null
+  # Required for google-drive: setup refuses while it is null or blank.
   bot_transfer: null # Host policy: Bot connector destinations and transfer/recovery policy.
 secrets:
   provider: 1password # Host policy; other providers are allowed.
@@ -67,7 +69,7 @@ budget:
   free_tier_only: true
   max_bots: 50
   storage_target_gb: 5 # Host planning target, not an audited spending cap.
-  # Private JSON: expires_at, repositories, max_source_bytes.
+  # R2 only: private JSON with expires_at, repositories, max_source_bytes.
   # Host verifies billing/quota and encryption overhead before issuing permission.
   attestation_file: null
 # Shared task management is required; see TASKS.md. Legacy tasks.enabled is ignored.

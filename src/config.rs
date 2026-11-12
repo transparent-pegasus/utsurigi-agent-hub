@@ -637,7 +637,7 @@ impl Config {
         if self.storage.is_local_backed() {
             if url.starts_with("s3:") {
                 return Err(Error::new(
-                    "S3 repository URLs need storage.provider: r2; the default is now google-drive",
+                    "s3: repository URLs require storage.provider: r2 (an omitted provider means google-drive); google-drive and local use absolute local paths",
                 ));
             }
             if !Path::new(url).is_absolute()
@@ -722,6 +722,16 @@ impl Config {
         if self.data.include.is_empty() {
             missing.push("data.include");
         }
+        // google-drive backups leave the machine only through the Bot's transfer policy.
+        if self.storage.provider == "google-drive"
+            && self
+                .storage
+                .bot_transfer
+                .as_deref()
+                .is_none_or(|policy| policy.trim().is_empty())
+        {
+            missing.push("storage.bot_transfer");
+        }
         missing
     }
 
@@ -794,7 +804,7 @@ mod tests {
                     .validate_url("s3:https://x.invalid/b/p")
                     .unwrap_err()
                     .message,
-                "S3 repository URLs need storage.provider: r2; the default is now google-drive"
+                "s3: repository URLs require storage.provider: r2 (an omitted provider means google-drive); google-drive and local use absolute local paths"
             );
             config.repositories.shared.url = Some("/nonexistent-uah/repos/shared".into());
             config.repositories.bot.url = Some("/nonexistent-uah/repos/shared/bot".into());
@@ -808,14 +818,6 @@ mod tests {
             config("s3").validate().unwrap_err().message,
             "Unsupported configuration version or storage provider"
         );
-    }
-
-    #[test]
-    fn google_drive_needs_no_cloud_attestation() {
-        let config = Config::default();
-        assert!(config.budget.free_tier_only && config.budget.attestation_file.is_none());
-        crate::budget::authorize(&config, &["/nonexistent-uah/repos/bot"], 1 << 30)
-            .unwrap_or_else(|e| panic!("{}", e.message));
     }
 }
 

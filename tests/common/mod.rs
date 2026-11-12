@@ -140,7 +140,10 @@ impl Fixture {
                 "hub": "default",
                 "timezone": "UTC",
                 "bot": {"id": id, "platform": "test", "runtime_id": runtime},
-                "storage": {"provider": "google-drive"},
+                "storage": {
+                    "provider": "google-drive",
+                    "bot_transfer": "Store complete quiescent encrypted repositories in private Google Drive folders; recover only verified generations."
+                },
                 "encryption": {"executable": restic::executable(), "version": "0.19.1"},
                 "repositories": {
                     "shared": {

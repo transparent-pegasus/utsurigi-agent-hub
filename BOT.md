@@ -18,7 +18,10 @@ the host injects them securely. Never replace existing instructions.
 Use `utsurigi-agent-hub --config <bot YAML> <command>`. Read `status` JSON first;
 consume only verified `status.active_shared`. Only the primary runtime backs up
 its Bot data. Every runtime runs [`live check`](OPS.md#live-sync); merge and delete
-`*.conflict-*` copies. Never edit another Bot's files; use `live request`. `registry publish` requires shared credentials and a current authoring base.
+`*.conflict-*` copies. Conflict copies arise only where runtimes share one store
+(R2, or one filesystem); with `google-drive` or `local`, one machine writes the hub.
+Never edit another Bot's files; use `live request`. `registry publish` requires
+shared credentials and a current authoring base.
 For long shared reads, follow the [reader lock protocol](OPS.md#publish-and-consume).
 
 Task management is required for new and existing Bots; follow [TASKS](TASKS.md).

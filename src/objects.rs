@@ -41,10 +41,10 @@ pub struct ObjectStore {
 impl ObjectStore {
     pub fn new(config: &Config, repository: &str) -> Result<Self> {
         config.validate_url(repository)?;
-        let backend = match config.storage.provider.as_str() {
-            _ if config.storage.is_local_backed() => Backend::Local(PathBuf::from(repository)),
-            "r2" => Backend::R2(r2_base(repository, SUBJECT)?),
-            _ => return Err(Error::new("Unsupported live object storage provider")),
+        let backend = if config.storage.is_local_backed() {
+            Backend::Local(PathBuf::from(repository))
+        } else {
+            Backend::R2(r2_base(repository, SUBJECT)?)
         };
         Ok(Self {
             backend,
