@@ -24,7 +24,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
-    name = "utsurigi",
+    name = env!("CARGO_BIN_NAME"),
     version,
     about = "Encrypted Bot storage and fleet coordination"
 )]
