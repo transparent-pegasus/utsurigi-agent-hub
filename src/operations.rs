@@ -591,9 +591,13 @@ fn prepare_initial(
     // Reserve the fixed-width master IDs of repositories that setup is about to
     // initialize. The callback after ensure's initialization uses actual IDs.
     let mut pending_ids = u64::from(id.is_none());
+    let mut pending_bot = None;
     if config.sharing.bot_data {
         match restic.repository_id(&config.repositories.bot) {
-            Err(error) if error.code == 10 => pending_ids += 1,
+            Err(error) if error.code == 10 => {
+                pending_ids += 1;
+                pending_bot = Some(config.id());
+            }
             Err(error) => return Err(error),
             Ok(_) => (),
         }
@@ -602,7 +606,7 @@ fn prepare_initial(
         config,
         data.export
             .bytes
-            .checked_add(data.history.pending_master_bytes(pending_ids))
+            .checked_add(data.history.pending_master_bytes(pending_ids, pending_bot))
             .ok_or_else(|| Error::new("Source size overflow"))?,
     )?;
     Ok(data)
