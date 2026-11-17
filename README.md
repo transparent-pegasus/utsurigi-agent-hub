@@ -1,4 +1,4 @@
-# utsurigi-agent-hub
+# utsurigi
 
 Keep Bot data in one external store. Then:
 
@@ -14,7 +14,7 @@ Setup, operations, and recovery guides load only when needed:
 Copy this prompt into the Bot you want to set up:
 
 ```text
-Clone https://github.com/transparent-pegasus/utsurigi-agent-hub .
+Clone https://github.com/transparent-pegasus/utsurigi .
 Read BOT.md first, then INIT.md; follow their references to other Markdown guides.
 ```
 

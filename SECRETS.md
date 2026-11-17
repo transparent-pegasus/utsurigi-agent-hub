@@ -55,7 +55,7 @@ With 1Password, for example, a host can maintain a reference-only
 `secret-refs.env` and start the CLI as follows (paths are placeholders):
 
 ```sh
-op run --env-file /PRIVATE/secret-refs.env -- utsurigi-agent-hub --config /PRIVATE/config.yaml status
+op run --env-file /PRIVATE/secret-refs.env -- utsurigi --config /PRIVATE/config.yaml status
 ```
 
 This shows the launch shape, not a successful injection test: `status` does not

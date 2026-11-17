@@ -166,7 +166,7 @@ impl Fixture {
             }),
         };
         bot.save();
-        let output = Command::new(env!("CARGO_BIN_EXE_utsurigi-agent-hub"))
+        let output = Command::new(env!("CARGO_BIN_EXE_utsurigi"))
             .env_clear()
             .arg("--config")
             .arg(&bot.file)
@@ -233,7 +233,7 @@ impl Fixture {
     }
 
     pub fn cli_command(&self, bot: &Bot, args: &[&str]) -> Command {
-        let mut command = self.command(env!("CARGO_BIN_EXE_utsurigi-agent-hub"));
+        let mut command = self.command(env!("CARGO_BIN_EXE_utsurigi"));
         let curl_bin = self.temp.path().join("head-curl/bin");
         if curl_bin.join("curl").is_file() {
             let path = std::env::join_paths(std::iter::once(curl_bin).chain(
@@ -290,7 +290,7 @@ impl Fixture {
         for (name, value) in env {
             command.env(name, value);
         }
-        command.output().expect("utsurigi-agent-hub must execute")
+        command.output().expect("utsurigi must execute")
     }
 
     pub fn ok(&self, bot: &Bot, args: &[&str]) -> Output {

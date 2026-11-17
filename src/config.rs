@@ -760,6 +760,7 @@ impl Config {
     // Hub-scoped: registries never carry a raw machine ID or link one machine across hubs.
     pub fn machine_hash(&self) -> Option<String> {
         let id = self.machine.id.as_deref()?;
+        // Stored identifier; keep the old name: registries hold hashes of this domain.
         let digest = Sha256::new()
             .chain_update(b"utsurigi-agent-hub machine v1\0")
             .chain_update(&self.hub)

@@ -73,7 +73,7 @@ fn public_template_validates_without_runtime_secrets_and_runtime_validation_fail
         (vec!["validate", "--template"], true),
         (vec!["validate"], false),
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_utsurigi-agent-hub"))
+        let output = Command::new(env!("CARGO_BIN_EXE_utsurigi"))
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .current_dir(temp.path())
@@ -99,7 +99,7 @@ fn template_status_names_configuration_as_next_action_without_creating_state() {
         &config,
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_utsurigi-agent-hub"))
+    let output = Command::new(env!("CARGO_BIN_EXE_utsurigi"))
         .env_clear()
         .arg("--config")
         .arg(&config)
@@ -154,7 +154,7 @@ fn private_configs_validate_with_or_without_machine_metadata_without_creating_it
             config["machine"] = machine.clone();
         }
         fs::write(&file, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
-        let output = Command::new(env!("CARGO_BIN_EXE_utsurigi-agent-hub"))
+        let output = Command::new(env!("CARGO_BIN_EXE_utsurigi"))
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .current_dir(&working)

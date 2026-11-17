@@ -28,8 +28,8 @@ official release. Runtime validation covers Linux.
 
 ```sh
 cargo build --locked --release
-./target/release/utsurigi-agent-hub validate --template
-./target/release/utsurigi-agent-hub --help
+./target/release/utsurigi validate --template
+./target/release/utsurigi --help
 ```
 
 Restic metadata records the OS username, hostname, and absolute staging paths. Restored data is

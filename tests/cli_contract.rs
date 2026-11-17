@@ -1980,7 +1980,7 @@ fn strict_template_validation(document: &str) -> std::process::Output {
     let temp = TempDir::new();
     let file = temp.path().join("config.yaml");
     fs::write(&file, document).unwrap();
-    std::process::Command::new(env!("CARGO_BIN_EXE_utsurigi-agent-hub"))
+    std::process::Command::new(env!("CARGO_BIN_EXE_utsurigi"))
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .current_dir(temp.path())
@@ -1988,7 +1988,7 @@ fn strict_template_validation(document: &str) -> std::process::Output {
         .arg(file)
         .args(["validate", "--template"])
         .output()
-        .expect("utsurigi-agent-hub must execute")
+        .expect("utsurigi must execute")
 }
 
 #[test]
@@ -4895,7 +4895,7 @@ fn hub_status_reports_default_and_named_membership_without_runtime_paths() {
         (json!({"hub": "personal"}), "personal"),
     ] {
         fs::write(&file, config.to_string()).unwrap();
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_utsurigi-agent-hub"))
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_utsurigi"))
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .current_dir(temp.path())

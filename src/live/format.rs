@@ -135,6 +135,7 @@ fn covers(directory: &str, path: &str) -> bool {
 }
 
 pub fn bot_key(hub: &str, bot: &str) -> String {
+    // Stored identifier; keep the old name: existing live indexes are keyed by these hashes.
     sha256_hex(
         ["utsurigi-agent-hub live v1", hub, bot]
             .join("\0")

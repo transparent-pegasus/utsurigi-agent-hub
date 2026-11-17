@@ -4,12 +4,13 @@ when: Updating an installed checkout or its CLI to a newer version.
 ---
 # Upgrading
 
-The version is `version` in [Cargo.toml](../Cargo.toml); `utsurigi-agent-hub --version`
+The version is `version` in [Cargo.toml](../Cargo.toml); `utsurigi --version`
 prints it. Release `X.Y.Z` is the `main` commit tagged `vX.Y.Z`.
 
-1. Record the installed version: `utsurigi-agent-hub --version`. If the CLI was
-   already rebuilt, read `version` in Cargo.toml at the commit before the update
-   (see `git reflog`).
+1. Record the installed version with `utsurigi --version`; where `utsurigi` does not
+   exist (before 0.2.0), use `utsurigi-agent-hub --version`. If the CLI was already
+   rebuilt, read `version` in Cargo.toml at the commit before the update (see
+   `git reflog`).
 2. Update the checkout to the target release tag, or to `main`.
 3. Apply every guide below that is newer than the recorded version, oldest first.
    Versions without a guide need no action.
@@ -18,7 +19,7 @@ prints it. Release `X.Y.Z` is the `main` commit tagged `vX.Y.Z`.
 
 ## Guides
 
-- [0.2.0](0.2.0.md): `storage.provider` defaults to `google-drive`.
+- [0.2.0](0.2.0.md): the CLI is now `utsurigi`; `storage.provider` defaults to `google-drive`.
 
 ## Releasing
 

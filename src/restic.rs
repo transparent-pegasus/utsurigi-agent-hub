@@ -85,6 +85,7 @@ impl Snapshot {
     }
 
     pub fn kind(&self, kind: &str) -> bool {
+        // Stored identifier; keep the old name: existing snapshots carry this tag.
         self.tags.iter().any(|s| s == "utsurigi-agent-hub") && self.tag("kind:") == Some(kind)
     }
 
@@ -622,6 +623,7 @@ impl<'a> Restic<'a> {
             ));
         }
         let tags = [
+            // Stored identifier; keep the old name: existing snapshots carry this tag.
             "utsurigi-agent-hub".to_owned(),
             format!("hub:{}", self.config.hub),
             format!("bot:{}", self.config.id()),
@@ -725,6 +727,7 @@ impl<'a> Restic<'a> {
             self.config.sync.read_concurrency.to_string().into(),
         ];
         for tag in [
+            // Stored identifier; keep the old name: existing snapshots carry this tag.
             "utsurigi-agent-hub".to_string(),
             format!("hub:{}", self.config.hub),
             format!("bot:{}", self.config.id()),

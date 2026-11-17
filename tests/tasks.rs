@@ -14,7 +14,7 @@ struct Case {
 }
 
 fn command(config: &std::path::Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_utsurigi-agent-hub"))
+    Command::new(env!("CARGO_BIN_EXE_utsurigi"))
         .env_clear()
         .arg("--config")
         .arg(config)
@@ -140,7 +140,11 @@ fn task_migration_preserves_native_files_and_legacy_false_cannot_disable_tasks()
     .unwrap();
     ok(c.run(&["init"]));
     ok(c.run(&["create", "mandatory work"]));
-    assert!(c.shared.join("tasks/FORMAT").exists());
+    // Stored identifier: existing task stores hold this marker, so a rename must keep it.
+    assert_eq!(
+        fs::read_to_string(c.shared.join("tasks/FORMAT")).unwrap(),
+        "utsurigi-agent-hub/tasks/1\n"
+    );
     assert_eq!(
         fs::read_to_string(preserved.join("native.md")).unwrap(),
         "native checklist"
