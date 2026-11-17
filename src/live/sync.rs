@@ -219,6 +219,7 @@ pub fn check(config: &Config) -> Result<()> {
 }
 
 fn run(config: &Config, root: &Path, live: &mut Live, now: i64) -> Result<Report> {
+    let previous = hub_mark(config)?;
     let mut cached = joined(config)?;
     let shared = ObjectStore::new(config, url(&config.repositories.shared))?;
     // A pending write, or a cache newer than the index last seen, needs the index body.
@@ -234,7 +235,11 @@ fn run(config: &Config, root: &Path, live: &mut Live, now: i64) -> Result<Report
         .map(|seen| seen.token.clone());
     let observed = read_index(&shared, token.as_deref())?;
     let before = live.list.as_ref().map(|list| list.revision);
-    let mut report = Report::default();
+    let mut report = Report {
+        // joined() replaces a cache that predates this machine's registration.
+        hub_changed: previous.is_some_and(|previous| previous != cached),
+        ..Report::default()
+    };
     let mut repair = false;
     let mut remote_changed = false;
     match &observed {
@@ -242,7 +247,7 @@ fn run(config: &Config, root: &Path, live: &mut Live, now: i64) -> Result<Report
             if index.hub.revision > cached.revision {
                 import_hub(config)?;
                 let imported = hub_mark(config)?.ok_or_else(missing_cache)?;
-                report.hub_changed = imported != cached;
+                report.hub_changed |= imported != cached;
                 cached = imported;
             }
             if index.hub.revision == cached.revision && index.hub.snapshot != cached.snapshot {
@@ -301,18 +306,24 @@ fn run(config: &Config, root: &Path, live: &mut Live, now: i64) -> Result<Report
     Ok(report)
 }
 
-/// Imports the hub on first use, then requires this machine to belong to the Bot.
+/// Imports the hub on first use, and again when the cache does not list this machine, since that
+/// cache can predate its registration; then requires this machine to belong to the Bot.
 fn joined(config: &Config) -> Result<HubMark> {
-    if hub_mark(config)?.is_none() {
+    if hub_mark(config)?.is_none() || !listed(config)? {
         import_hub(config)?;
-    }
-    let active = shared::active(config)?.ok_or_else(missing_cache)?;
-    if Registry::load(&active, config)?.role(config).is_none() {
-        return Err(Error::new(
-            "This machine is not listed for the Bot; add status.machine to its registry machines",
-        ));
+        if !listed(config)? {
+            return Err(Error::new(
+                "This machine is not listed for the Bot; add status.machine to its registry machines",
+            ));
+        }
     }
     hub_mark(config)?.ok_or_else(missing_cache)
+}
+
+/// Whether the cached registry lists this machine for the Bot.
+fn listed(config: &Config) -> Result<bool> {
+    let active = shared::active(config)?.ok_or_else(missing_cache)?;
+    Ok(Registry::load(&active, config)?.role(config).is_some())
 }
 
 /// Reads the list and merges it with local files; `None` when the Bot defines no list.

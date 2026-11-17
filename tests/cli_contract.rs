@@ -1980,7 +1980,7 @@ fn strict_template_validation(document: &str) -> std::process::Output {
     let temp = TempDir::new();
     let file = temp.path().join("config.yaml");
     fs::write(&file, document).unwrap();
-    std::process::Command::new(env!("CARGO_BIN_EXE_utsurigi-agent-hub"))
+    std::process::Command::new(env!("CARGO_BIN_EXE_utsurigi"))
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .current_dir(temp.path())
@@ -1988,7 +1988,7 @@ fn strict_template_validation(document: &str) -> std::process::Output {
         .arg(file)
         .args(["validate", "--template"])
         .output()
-        .expect("utsurigi-agent-hub must execute")
+        .expect("utsurigi must execute")
 }
 
 #[test]
@@ -2689,12 +2689,15 @@ fn registry_privacy_assert_current_base(fixture: &Fixture) {
         &fs::read(fixture.alpha.path("shared").join("shared-revision.json")).unwrap(),
     )
     .unwrap();
+    let repository = fixture.restic(&fixture.alpha, "shared", &["cat", "config"]);
+    success(&repository);
+    let repository: Value = serde_json::from_slice(&repository.stdout).unwrap();
     assert_eq!(
         marker,
         json!({
-            "version": 2,
+            "version": 3,
             "hub": head["hub"],
-            "repository_sha256": format!("{:x}", Sha256::digest(fixture.alpha.repository("shared").as_bytes())),
+            "repository_id": repository["id"],
             "revision": head["revision"],
         }),
         "privacy rejection must start from a valid current authoring base"
@@ -2882,7 +2885,8 @@ fn registry_privacy_publication_refuses_uninspectable_prior_shared_repositories(
         let registry = fixture.alpha.path("shared").join("registry.yaml");
         registry_privacy_stage_registry(&fixture, &tool, &registry);
         fixture.registry(&fixture.alpha, &[&fixture.alpha, &beta, &gamma]);
-        for (name, digit) in [("shared", "a"), ("alpha", "b"), ("gamma", "c")] {
+        // The shared repository keeps its real ID, which the authoring base names.
+        for (name, digit) in [("alpha", "b"), ("gamma", "c")] {
             fs::write(
                 tool.join(format!("repository-config-{name}")),
                 json!({"id": digit.repeat(64)}).to_string(),
@@ -4891,7 +4895,7 @@ fn hub_status_reports_default_and_named_membership_without_runtime_paths() {
         (json!({"hub": "personal"}), "personal"),
     ] {
         fs::write(&file, config.to_string()).unwrap();
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_utsurigi-agent-hub"))
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_utsurigi"))
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .current_dir(temp.path())

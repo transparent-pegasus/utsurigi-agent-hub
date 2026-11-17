@@ -2094,5 +2094,24 @@ fn v1_existing_remote_envelope_without_record_accepts_only_scoped_local_record()
         &fs::read(active(&fixture, &beta).join("decisions.yaml")).unwrap(),
     )
     .unwrap();
-    assert_eq!(adopted, serde_saphyr::from_str::<Value>(&local).unwrap());
+    // The CLI encodes the merged record itself, in the current repository-ID format.
+    let repository: Value = serde_json::from_slice(
+        &raw(
+            &fixture,
+            &beta,
+            "shared",
+            &beta.path("shared"),
+            &["cat", "config"],
+        )
+        .stdout,
+    )
+    .unwrap();
+    let mut expected = serde_saphyr::from_str::<Value>(&local).unwrap();
+    expected["version"] = json!(2);
+    expected
+        .as_object_mut()
+        .unwrap()
+        .remove("repository_sha256");
+    expected["repository_id"] = repository["id"].clone();
+    assert_eq!(adopted, expected);
 }

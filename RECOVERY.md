@@ -101,7 +101,14 @@ the guard. Shared credential holders are trusted publishers.
 Publication may read delivered prior shared peers' repositories for identity
 checks. Registered shared peers must run `setup` before subsequent checks, or the
 host must withhold unneeded peer passwords. An unavailable prior repository
-holds publication; exit 10 is not permission to forget its history.
+holds publication; exit 10 is not permission to forget its history. The exception
+is a moved `google-drive` or `local` repository: a prior shared repository missing
+at its registered path is accepted only when the published registry names the same
+Bot at a repository, such as an exact copy, whose restic ID the history already
+holds for that Bot. For a Bot without IDs of its own in the history, such as one
+recorded before 0.2.0, the ID must instead be in the history and the repository
+must hold snapshots that all belong to that Bot
+([moving repositories](upgrading/0.2.0.md)).
 
 Unrecognized snapshot metadata or a snapshot from another hub blocks operations on that
 repository, including restore by a valid ID, until it is reconciled with
@@ -145,11 +152,12 @@ migration decision supplement separately; unchanged knowledge and existing decis
 bytes must match. Other missing, extra, or different files fail. `restore --verify` alone is
 insufficient. If the original is lost, report that source-byte equality cannot be
 retested; successful integrity verification is not evidence of that comparison.
-For Bot-managed remote transfers, fetch a complete verified encrypted generation
-into a fresh directory and check/restore that copy. Retain the previous generation
-and originals until all applicable [acceptance criteria](INIT.md#acceptance-criteria)
-pass. Delete the temporary plaintext comparison copy after successful acceptance;
-keep the original sources according to their approved retention policy.
+For Bot-managed remote transfers (`google-drive`, `local`), fetch a complete
+verified encrypted generation into a fresh directory and check/restore that copy.
+Retain the previous generation and originals until all applicable
+[acceptance criteria](INIT.md#acceptance-criteria) pass. Delete the temporary
+plaintext comparison copy after successful acceptance; keep the original sources
+according to their approved retention policy.
 
 Incomplete/uncertain writes never authorize deletion of the prior successful
 version. With `sync.versioning: true` (default), a completed predecessor expires

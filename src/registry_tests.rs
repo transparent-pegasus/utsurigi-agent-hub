@@ -42,6 +42,7 @@ fn config(bot: &str, runtime: &str, machine: Option<&str>) -> Config {
         hub: "default".into(),
         ..Config::default()
     };
+    config.storage.provider = "r2".into();
     config.bot.id = Some(bot.into());
     config.bot.runtime_id = Some(runtime.into());
     config.machine.id = machine.map(Into::into);

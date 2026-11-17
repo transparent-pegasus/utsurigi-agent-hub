@@ -43,6 +43,11 @@ impl Failure {
             .next()
             .unwrap_or("")
             .to_ascii_lowercase();
+        // Classify a registry entry's cause; neither the prefix nor the Bot ID picks the category.
+        let message = message
+            .strip_prefix("registry entry ")
+            .and_then(|entry| entry.split_once(": "))
+            .map_or(message.as_str(), |(_, cause)| cause);
         let (category, reason, next_action) = if error.code == 12
             || message.contains("password")
             || message.contains("credential")
@@ -454,6 +459,18 @@ mod tests {
         );
         assert!(!error.message.contains("running"), "{}", error.message);
         assert!(!error.message.contains("Timed out"), "{}", error.message);
+    }
+
+    #[test]
+    fn registry_entry_errors_keep_their_cause_category() {
+        let cause = "Local repository URLs must be absolute paths";
+        for message in [
+            cause.to_owned(),
+            format!("Registry entry private-lock-runtime: {cause}"),
+        ] {
+            let failure = Failure::sanitized("setup", &Error::new(message));
+            assert_eq!(failure.category, "operation");
+        }
     }
 
     #[test]

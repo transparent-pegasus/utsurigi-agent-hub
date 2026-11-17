@@ -1,8 +1,20 @@
 [package]
-name = "utsurigi-agent-hub"
-version = "0.1.0"
+name = "utsurigi"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.89"
+default-run = "utsurigi"
+
+[[bin]]
+name = "utsurigi"
+path = "src/main.rs"
+
+# Compatibility name: jobs and copied installs that call the pre-0.2.0 command keep working.
+[[bin]]
+name = "utsurigi-agent-hub"
+path = "src/main.rs"
+test = false
+doc = false
 
 [dependencies]
 argon2 = { version = "0.6", default-features = false, features = ["alloc"] }

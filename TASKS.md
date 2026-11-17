@@ -41,7 +41,7 @@ schedule: null
 due: 2026-11-15T23:59+09:00
 workdir: /workspace/uah-intro-4bots
 requires:
-  - repo: transparent-pegasus/utsurigi-agent-hub
+  - repo: transparent-pegasus/utsurigi
   - secret: utsurigi-r2-credentials
 start_after: []
 done_when: []
@@ -125,16 +125,16 @@ requirement only blocks completion; it does not prevent useful work from startin
 
 ## Commands and concurrent updates
 
-Use the normal `utsurigi-agent-hub --config BOT_YAML` prefix:
+Use the normal `utsurigi --config BOT_YAML` prefix:
 
 ```sh
-utsurigi-agent-hub --config BOT_YAML tasks init
-utsurigi-agent-hub --config BOT_YAML tasks create 'Prepare migration'
-utsurigi-agent-hub --config BOT_YAML tasks show UUID
-utsurigi-agent-hub --config BOT_YAML tasks put --file TASK_DRAFT.md --if-match ETAG
-utsurigi-agent-hub --config BOT_YAML tasks validate
-utsurigi-agent-hub --config BOT_YAML tasks index
-utsurigi-agent-hub --config BOT_YAML registry publish
+utsurigi --config BOT_YAML tasks init
+utsurigi --config BOT_YAML tasks create 'Prepare migration'
+utsurigi --config BOT_YAML tasks show UUID
+utsurigi --config BOT_YAML tasks put --file TASK_DRAFT.md --if-match ETAG
+utsurigi --config BOT_YAML tasks validate
+utsurigi --config BOT_YAML tasks index
+utsurigi --config BOT_YAML registry publish
 ```
 
 Create starts in `pending`. Show returns metadata, body, and the SHA-256 ETag of
@@ -150,7 +150,8 @@ journals stop for reconciliation. Preserve them and the original export; never
 blindly delete a pending journal. Manual file edits require quiescent writers,
 correct archive placement, and `tasks index` before publishing.
 
-Cross-machine writes use the existing shared revision CAS. Refresh the verified
+On R2, cross-machine writes use the existing shared revision CAS; with
+`google-drive` or `local`, one machine writes the hub. Refresh the verified
 authoring base as described in OPS, retain `shared-revision.json`, omit generated
 `registry-history.json`, then reconcile edits and publish. A stale base or lost
 CAS preserves drafts and requires explicit reconciliation. Ordinary sync consumes

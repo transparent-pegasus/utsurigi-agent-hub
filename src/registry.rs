@@ -193,7 +193,9 @@ impl Registry {
                     "Invalid or duplicate registry identity/repository",
                 ));
             }
-            config.validate_url(&entry.repository)?;
+            config.validate_url(&entry.repository).map_err(|error| {
+                Error::new(format!("Registry entry {}: {}", entry.id, error.message))
+            })?;
             let mut machines = HashSet::new();
             if !entry.machines.iter().all(|machine| {
                 machine.len() == 64
@@ -360,7 +362,15 @@ impl Registry {
                         "Shared-to-private transition requires a new password and master key",
                     ));
                 }
-                let old_id = restic.repository_id(&old_repository)?;
+                let old_id = match restic.repository_id(&old_repository) {
+                    Ok(id) => id,
+                    // A moved local repository is uninspectable here. Publish then
+                    // refuses it unless history proves the move (`Missing::Moved`).
+                    Err(error) if error.code == 10 && config.storage.is_local_backed() => {
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 match restic.repository_id(&repository) {
                     Ok(id) if id == old_id => {
                         return Err(Error::new(

@@ -13,7 +13,7 @@ struct Attestation {
 }
 
 pub fn authorize(config: &Config, repositories: &[&str], source_bytes: u64) -> Result<()> {
-    if config.storage.provider == "local" || !config.budget.free_tier_only {
+    if config.storage.is_local_backed() || !config.budget.free_tier_only {
         return Ok(());
     }
     let held = || {

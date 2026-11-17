@@ -27,7 +27,7 @@ fn public_defaults_match_the_exact_onboarding_schedule_and_feature_contract() {
         (vec!["bot", "role"], Value::Null),
         (vec!["machine", "id"], Value::Null),
         (vec!["machine", "root"], Value::Null),
-        (vec!["storage", "provider"], json!("r2")),
+        (vec!["storage", "provider"], json!("google-drive")),
         (vec!["storage", "class"], json!("standard")),
         (vec!["storage", "credentials_ref"], Value::Null),
         (vec!["storage", "bot_transfer"], Value::Null),
@@ -73,7 +73,7 @@ fn public_template_validates_without_runtime_secrets_and_runtime_validation_fail
         (vec!["validate", "--template"], true),
         (vec!["validate"], false),
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_utsurigi-agent-hub"))
+        let output = Command::new(env!("CARGO_BIN_EXE_utsurigi"))
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .current_dir(temp.path())
@@ -99,7 +99,7 @@ fn template_status_names_configuration_as_next_action_without_creating_state() {
         &config,
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_utsurigi-agent-hub"))
+    let output = Command::new(env!("CARGO_BIN_EXE_utsurigi"))
         .env_clear()
         .arg("--config")
         .arg(&config)
@@ -137,7 +137,7 @@ fn private_configs_validate_with_or_without_machine_metadata_without_creating_it
             "timezone": "UTC",
             "bot": {"id": "alpha", "platform": "test", "runtime_id": "alpha-1"},
             "storage": {
-                "provider": "local",
+                "provider": "google-drive",
                 "bot_transfer": "Store complete quiescent encrypted repositories in private Google Drive folders; recover only verified generations."
             },
             "repositories": {
@@ -154,7 +154,7 @@ fn private_configs_validate_with_or_without_machine_metadata_without_creating_it
             config["machine"] = machine.clone();
         }
         fs::write(&file, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
-        let output = Command::new(env!("CARGO_BIN_EXE_utsurigi-agent-hub"))
+        let output = Command::new(env!("CARGO_BIN_EXE_utsurigi"))
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .current_dir(&working)

@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 #[path = "task_import.rs"]
 mod migration;
 
+// Stored identifier; keep the old name: existing task stores hold this FORMAT marker.
 const FORMAT: &str = "utsurigi-agent-hub/tasks/1\n";
 const JOURNAL: &str = ".pending.json";
 const REQUIRED: &str = "Task management is required; preserve native records, run tasks init and import them before setup or publication";

@@ -1,4 +1,4 @@
-# utsurigi-agent-hub
+# utsurigi
 
 Keep Bot data in one external store. Then:
 
@@ -14,16 +14,19 @@ Setup, operations, and recovery guides load only when needed:
 Copy this prompt into the Bot you want to set up:
 
 ```text
-Clone https://github.com/transparent-pegasus/utsurigi-agent-hub .
+Clone https://github.com/transparent-pegasus/utsurigi .
 Read BOT.md first, then INIT.md; follow their references to other Markdown guides.
 ```
 
 ## Features
 
-- External data: encrypted storage and recovery, through R2 or the Bot.
+- External data: encrypted storage and recovery, through Google Drive via the
+  Bot's connector (default; one machine writes the hub), R2, or other stores via
+  the Bot.
 - Named hubs: choose each Bot's hub during setup.
-- Live sync: tasks and rules reach the Bot's other machines and peers within
-  minutes, one read per check. See [OPS](OPS.md#live-sync).
+- Live sync: tasks and rules reach the Bot's other runtimes and peers within
+  minutes, one read per check; across machines, on R2 only.
+  See [OPS](OPS.md#live-sync).
 - Periodic review: prefer native Bot features when equivalent or better.
 - Setup through dialogue.
 - Required [shared tasks](TASKS.md): dependencies, user waits, goals, logs, and archived history across Bots.
@@ -59,10 +62,15 @@ Give Bots in one hub+machine the same `paths.imports` root. See
 
 ## Requirements
 
-Bundled cloud scripts: R2 only. For S3, Google Cloud Storage, Google Drive, etc.,
-write your own or ask your Bot to build them through dialogue.
+Bundled cloud scripts: R2 only. For S3, Google Cloud Storage, etc., write your own
+or ask your Bot to build them through dialogue.
 
 For trusted Bots under one owner. Requires Unix and Rust.
 Validated on Linux only.
 Optional memory also needs C/C++ build tools; on Debian, run `apt install g++`.
 See [optional memory](optional/README.md) for runtime and migration requirements.
+
+## Upgrading
+
+Before updating an installed checkout, follow [upgrading](upgrading/README.md).
+It lists the per-version migration guides.

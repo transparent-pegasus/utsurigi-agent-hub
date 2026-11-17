@@ -4,6 +4,7 @@ use crate::selection::{Export, validate_import};
 use crate::state::{private_dir, private_file};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::cell::OnceCell;
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -16,6 +17,7 @@ pub struct Restic<'a> {
     cache: PathBuf,
     temp: PathBuf,
     inherited_shared_password: Option<OsString>,
+    shared_repository_id: OnceCell<String>,
 }
 
 pub enum BackupGuard {
@@ -83,6 +85,7 @@ impl Snapshot {
     }
 
     pub fn kind(&self, kind: &str) -> bool {
+        // Stored identifier; keep the old name: existing snapshots carry this tag.
         self.tags.iter().any(|s| s == "utsurigi-agent-hub") && self.tag("kind:") == Some(kind)
     }
 
@@ -381,6 +384,7 @@ impl<'a> Restic<'a> {
             cache,
             temp,
             inherited_shared_password: None,
+            shared_repository_id: OnceCell::new(),
         })
     }
 
@@ -619,6 +623,7 @@ impl<'a> Restic<'a> {
             ));
         }
         let tags = [
+            // Stored identifier; keep the old name: existing snapshots carry this tag.
             "utsurigi-agent-hub".to_owned(),
             format!("hub:{}", self.config.hub),
             format!("bot:{}", self.config.id()),
@@ -686,6 +691,15 @@ impl<'a> Restic<'a> {
             .ok_or_else(|| Error::new("Invalid restic repository identity"))
     }
 
+    /// The configured shared repository's ID, read at most once per command.
+    pub fn shared_repository_id(&self) -> Result<&str> {
+        if let Some(id) = self.shared_repository_id.get() {
+            return Ok(id);
+        }
+        let id = self.repository_id(&self.config.repositories.shared)?;
+        Ok(self.shared_repository_id.get_or_init(|| id))
+    }
+
     pub fn backup(
         &self,
         repository: &Repository,
@@ -713,6 +727,7 @@ impl<'a> Restic<'a> {
             self.config.sync.read_concurrency.to_string().into(),
         ];
         for tag in [
+            // Stored identifier; keep the old name: existing snapshots carry this tag.
             "utsurigi-agent-hub".to_string(),
             format!("hub:{}", self.config.hub),
             format!("bot:{}", self.config.id()),

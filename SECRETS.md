@@ -55,7 +55,7 @@ With 1Password, for example, a host can maintain a reference-only
 `secret-refs.env` and start the CLI as follows (paths are placeholders):
 
 ```sh
-op run --env-file /PRIVATE/secret-refs.env -- utsurigi-agent-hub --config /PRIVATE/config.yaml status
+op run --env-file /PRIVATE/secret-refs.env -- utsurigi --config /PRIVATE/config.yaml status
 ```
 
 This shows the launch shape, not a successful injection test: `status` does not
@@ -65,7 +65,8 @@ are ordinary literal values to the Hub's dotenv loader. Do not put secret values
 in arguments, YAML, or the above command. Auth for `op` is the host's responsibility.
 
 R2 storage needs `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally
-`AWS_SESSION_TOKEN`. Provider bootstrap tokens are not restic credentials and
+`AWS_SESSION_TOKEN`; `google-drive` and `local` need none: the CLI never contacts
+remote storage for them. Provider bootstrap tokens are not restic credentials and
 are not forwarded to restic or acquisition curl. Each restic command receives only
 its selected repository password as `RESTIC_PASSWORD`; peer password names are
 not copied wholesale to children.

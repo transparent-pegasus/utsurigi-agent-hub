@@ -140,7 +140,10 @@ impl Fixture {
                 "hub": "default",
                 "timezone": "UTC",
                 "bot": {"id": id, "platform": "test", "runtime_id": runtime},
-                "storage": {"provider": "local"},
+                "storage": {
+                    "provider": "google-drive",
+                    "bot_transfer": "Store complete quiescent encrypted repositories in private Google Drive folders; recover only verified generations."
+                },
                 "encryption": {"executable": restic::executable(), "version": "0.19.1"},
                 "repositories": {
                     "shared": {
@@ -163,7 +166,7 @@ impl Fixture {
             }),
         };
         bot.save();
-        let output = Command::new(env!("CARGO_BIN_EXE_utsurigi-agent-hub"))
+        let output = Command::new(env!("CARGO_BIN_EXE_utsurigi"))
             .env_clear()
             .arg("--config")
             .arg(&bot.file)
@@ -230,7 +233,7 @@ impl Fixture {
     }
 
     pub fn cli_command(&self, bot: &Bot, args: &[&str]) -> Command {
-        let mut command = self.command(env!("CARGO_BIN_EXE_utsurigi-agent-hub"));
+        let mut command = self.command(env!("CARGO_BIN_EXE_utsurigi"));
         let curl_bin = self.temp.path().join("head-curl/bin");
         if curl_bin.join("curl").is_file() {
             let path = std::env::join_paths(std::iter::once(curl_bin).chain(
@@ -287,7 +290,7 @@ impl Fixture {
         for (name, value) in env {
             command.env(name, value);
         }
-        command.output().expect("utsurigi-agent-hub must execute")
+        command.output().expect("utsurigi must execute")
     }
 
     pub fn ok(&self, bot: &Bot, args: &[&str]) -> Output {
